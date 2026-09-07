@@ -18,3 +18,7 @@ wow_world_messages.workspace = true
 auth-server.workspace = true
 reqwest.workspace = true
 world-server.workspace = true
+
+[[test]]
+name = "enter_world"
+path = "test/enter_world.rs"

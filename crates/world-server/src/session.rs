@@ -1,24 +1,43 @@
 use tokio::net::TcpStream;
-use wow_shared::{CharacterTemplate, SessionInfo, parse_account};
+use wow_shared::{Account, CharacterTemplate, SessionInfo, parse_account};
 use wow_srp::normalized_string::NormalizedString;
 use wow_srp::vanilla_header::{HeaderCrypto, ProofSeed};
-use wow_world_messages::Guid;
-use wow_world_messages::vanilla::opcodes::ClientOpcodeMessage;
 use wow_world_messages::vanilla::{
-    Addon, Addon_InfoBlock, Addon_UrlInfo, AddonType, Area, CMSG_AUTH_SESSION, Character, Class,
-    CreatureFamily, Gender, Level, Map, Race, SMSG_ADDON_INFO, SMSG_AUTH_CHALLENGE,
-    SMSG_AUTH_RESPONSE, SMSG_CHAR_ENUM, SMSG_PONG, ServerMessage, Vector3d,
-    tokio_expect_client_message,
+    Addon, Addon_InfoBlock, Addon_UrlInfo, AddonType, CMSG_AUTH_SESSION, SMSG_ADDON_INFO,
+    SMSG_AUTH_CHALLENGE, SMSG_AUTH_RESPONSE, ServerMessage, tokio_expect_client_message,
 };
 
-use crate::enter_world;
-use crate::packet::{Incoming, read_incoming};
+use crate::player::Player;
+use crate::protocol::action::ClientAction;
+use crate::protocol::{ClientConnection, ConnectionEvent};
+use crate::world::{PlayerMailbox, World, WorldPresence};
+
+struct AuthenticatedClient {
+    stream: TcpStream,
+    encryption: HeaderCrypto,
+    account: Account,
+}
 
 pub async fn handle_client(
-    mut stream: TcpStream,
+    stream: TcpStream,
     auth_internal_url: String,
     log_unhandled_packets: bool,
+    world: World,
 ) -> anyhow::Result<()> {
+    let Some(authenticated) = authenticate(stream, &auth_internal_url).await? else {
+        return Ok(());
+    };
+    tracing::info!(account = %authenticated.account.username, "world session authenticated");
+
+    let character = CharacterTemplate::for_account(&authenticated.account);
+    let connection = ClientConnection::new(authenticated.stream, authenticated.encryption);
+    run_session(connection, character, world, log_unhandled_packets).await
+}
+
+async fn authenticate(
+    mut stream: TcpStream,
+    auth_internal_url: &str,
+) -> anyhow::Result<Option<AuthenticatedClient>> {
     let seed = ProofSeed::new();
     SMSG_AUTH_CHALLENGE {
         server_seed: seed.seed(),
@@ -28,7 +47,7 @@ pub async fn handle_client(
 
     let auth = tokio_expect_client_message::<CMSG_AUTH_SESSION, _>(&mut stream).await?;
     let account = parse_account(&auth.username)?;
-    let session = fetch_session(&auth_internal_url, &account.username).await?;
+    let session = fetch_session(auth_internal_url, &account.username).await?;
 
     let mut encryption = match seed.into_server_header_crypto(
         &NormalizedString::new(&account.username)?,
@@ -39,7 +58,7 @@ pub async fn handle_client(
         Ok(crypto) => crypto,
         Err(error) => {
             tracing::info!(account = %account.username, %error, "world auth proof failed");
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -52,16 +71,11 @@ pub async fn handle_client(
     .await?;
 
     send_addon_info(&mut stream, &mut encryption, &auth).await?;
-    tracing::info!(account = %account.username, "world session authenticated");
-
-    let character = CharacterTemplate::for_account(&account);
-    run_session(
-        &mut stream,
-        &mut encryption,
-        character,
-        log_unhandled_packets,
-    )
-    .await
+    Ok(Some(AuthenticatedClient {
+        stream,
+        encryption,
+        account,
+    }))
 }
 
 async fn fetch_session(auth_internal_url: &str, account: &str) -> anyhow::Result<SessionInfo> {
@@ -102,92 +116,174 @@ async fn send_addon_info(
 }
 
 async fn run_session(
-    stream: &mut TcpStream,
-    encryption: &mut HeaderCrypto,
-    character: CharacterTemplate,
+    mut connection: ClientConnection,
+    mut character: CharacterTemplate,
+    world: World,
     log_unhandled_packets: bool,
 ) -> anyhow::Result<()> {
-    let mut in_world = false;
+    let mailbox = connection.mailbox();
+    let mut presence: Option<WorldPresence> = None;
 
-    loop {
-        let opcode = match read_incoming(&mut *stream, encryption).await {
-            Ok(Incoming::Message(opcode)) => opcode,
-            Ok(Incoming::Skipped { opcode, name }) => {
-                if log_unhandled_packets {
-                    tracing::info!(opcode, name, in_world, "unhandled packet");
+    let result = loop {
+        match connection.next().await {
+            ConnectionEvent::Disconnected => {
+                tracing::debug!(name = %character.name, "client disconnected");
+                break Ok(());
+            }
+            ConnectionEvent::World(event) => {
+                if let Err(error) = connection.apply(event).await {
+                    break Err(error);
                 }
-                continue;
             }
-            Err(error) => {
-                tracing::debug!(%error, "client disconnected");
-                return Ok(());
-            }
-        };
-
-        match opcode {
-            ClientOpcodeMessage::CMSG_PING(ping) => {
-                SMSG_PONG {
-                    sequence_id: ping.sequence_id,
-                }
-                .tokio_write_encrypted_server(&mut *stream, encryption.encrypter())
-                .await?;
-            }
-            ClientOpcodeMessage::CMSG_CHAR_ENUM => {
-                send_char_enum(&mut *stream, encryption, &character).await?;
-            }
-            ClientOpcodeMessage::CMSG_PLAYER_LOGIN(login) => {
-                if login.guid != Guid::new(character.guid) {
-                    tracing::warn!(guid = ?login.guid, "unknown character guid");
-                    continue;
-                }
-                enter_world::send_enter_world(&mut *stream, encryption, &character).await?;
-                in_world = true;
-                tracing::info!(name = %character.name, "player entered world");
-            }
-            other => {
-                if log_unhandled_packets {
-                    tracing::info!(opcode = %other, in_world, "unhandled packet");
+            ConnectionEvent::Action(action) => {
+                if let Err(error) = handle_action(
+                    action,
+                    &mut connection,
+                    &mut character,
+                    &world,
+                    &mailbox,
+                    &mut presence,
+                    log_unhandled_packets,
+                )
+                .await
+                {
+                    break Err(error);
                 }
             }
         }
-    }
+    };
+
+    drop(presence);
+    connection.close();
+    result
 }
 
-async fn send_char_enum(
-    stream: &mut TcpStream,
-    encryption: &mut HeaderCrypto,
-    character: &CharacterTemplate,
+async fn handle_action(
+    action: ClientAction,
+    connection: &mut ClientConnection,
+    character: &mut CharacterTemplate,
+    world: &World,
+    mailbox: &PlayerMailbox,
+    presence: &mut Option<WorldPresence>,
+    log_unhandled_packets: bool,
 ) -> anyhow::Result<()> {
-    SMSG_CHAR_ENUM {
-        characters: vec![Character {
-            guid: Guid::new(character.guid),
-            name: character.name.clone(),
-            race: Race::Human,
-            class: Class::Warrior,
-            gender: Gender::Male,
-            skin: 0,
-            face: 0,
-            hair_style: 0,
-            hair_color: 0,
-            facial_hair: 0,
-            level: Level::new_player(),
-            area: Area::NorthshireValley,
-            map: Map::EasternKingdoms,
-            position: Vector3d {
-                x: character.x,
-                y: character.y,
-                z: character.z,
-            },
-            guild_id: 0,
-            flags: Default::default(),
-            first_login: false,
-            pet_display_id: 0,
-            pet_level: Level::zero(),
-            pet_family: CreatureFamily::None,
-            equipment: [Default::default(); 19],
-        }],
+    let in_world = presence.is_some();
+    match action {
+        ClientAction::Ping { sequence_id } => connection.pong(sequence_id).await?,
+        ClientAction::ListCharacters => connection.send_character_list(character).await?,
+        ClientAction::EnterWorld { guid } => {
+            enter_world(connection, character, world, mailbox, presence, guid).await?;
+        }
+        ClientAction::QueryName { guid } => reply_name(connection, character, world, guid).await?,
+        ClientAction::QueryCreature { entry, guid } => {
+            reply_creature(connection, world, entry, guid).await?;
+        }
+        ClientAction::Select => {}
+        ClientAction::Attack { guid } if in_world => {
+            world.start_attack(mailbox, character.guid, guid);
+        }
+        ClientAction::Attack { .. } => {}
+        ClientAction::StopAttack if in_world => {
+            world.stop_attack(mailbox, character.guid);
+        }
+        ClientAction::StopAttack => {}
+        ClientAction::ChangeStandState { state } if in_world => {
+            world.change_stand_state(mailbox, character.guid, state);
+        }
+        ClientAction::ChangeStandState { .. } => {}
+        ClientAction::GossipHello { guid } if in_world => {
+            world.open_gossip(mailbox, character.guid, guid);
+        }
+        ClientAction::GossipHello { .. } => {}
+        ClientAction::GossipSelect { guid, option } if in_world => {
+            world.select_gossip_option(mailbox, character.guid, guid, option);
+        }
+        ClientAction::GossipSelect { .. } => {}
+        ClientAction::QueryNpcText { text_id } => {
+            let text = world.npc_text(text_id);
+            connection.reply_npc_text(text_id, text.as_deref()).await?;
+        }
+        ClientAction::Moved(pending) if in_world => {
+            if let Some(movement) = pending.bind(character.guid) {
+                character.position = movement.position;
+                world.broadcast_move(mailbox, movement);
+            }
+        }
+        ClientAction::Moved(_) => {}
+        ClientAction::Chat(pending) if in_world => {
+            world.speak(mailbox, pending.bind(character.guid));
+        }
+        ClientAction::Chat(_) => {}
+        ClientAction::Ignored(ignored) => {
+            if log_unhandled_packets {
+                tracing::info!(
+                    opcode = ignored.opcode,
+                    name = ignored.name.as_deref(),
+                    in_world,
+                    "unhandled packet"
+                );
+            }
+        }
     }
-    .tokio_write_encrypted_server(stream, encryption.encrypter())
-    .await?;
     Ok(())
+}
+
+async fn enter_world(
+    connection: &mut ClientConnection,
+    character: &CharacterTemplate,
+    world: &World,
+    mailbox: &PlayerMailbox,
+    presence: &mut Option<WorldPresence>,
+    guid: u64,
+) -> anyhow::Result<()> {
+    if guid != character.guid {
+        tracing::warn!(guid, "unknown character guid");
+        return Ok(());
+    }
+
+    connection.enter_world(character).await?;
+    let nearby = world.join(Player::from(character), mailbox.clone());
+    *presence = Some(WorldPresence::new(
+        world.clone(),
+        character.guid,
+        mailbox.clone(),
+    ));
+    connection.show_players(&nearby).await?;
+    let npcs = world.creatures();
+    connection.show_creatures(&npcs).await?;
+    tracing::info!(
+        name = %character.name,
+        nearby = nearby.len(),
+        npcs = npcs.len(),
+        "player entered world"
+    );
+    Ok(())
+}
+
+async fn reply_name(
+    connection: &mut ClientConnection,
+    character: &CharacterTemplate,
+    world: &World,
+    guid: u64,
+) -> anyhow::Result<()> {
+    let player = world
+        .player(guid)
+        .or_else(|| (guid == character.guid).then(|| Player::from(character)));
+    let Some(player) = player else {
+        return Ok(());
+    };
+    connection.reply_name(guid, &player).await
+}
+
+async fn reply_creature(
+    connection: &mut ClientConnection,
+    world: &World,
+    entry: u32,
+    guid: u64,
+) -> anyhow::Result<()> {
+    let creature = world
+        .creature(guid)
+        .or_else(|| world.creature_by_entry(entry));
+    let creature = creature.filter(|creature| creature.entry == entry);
+    connection.reply_creature(entry, creature.as_ref()).await
 }

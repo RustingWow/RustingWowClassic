@@ -5,7 +5,7 @@ mod session;
 mod tracing_init;
 
 pub use character::{
-    CharacterTemplate, NORTHSHIRE_ORIENTATION, NORTHSHIRE_X, NORTHSHIRE_Y, NORTHSHIRE_Z,
+    CharacterTemplate, NORTHSHIRE_ORIENTATION, NORTHSHIRE_X, NORTHSHIRE_Y, NORTHSHIRE_Z, Position,
 };
 pub use config::{AuthConfig, WorldConfig};
 pub use credentials::{Account, CredentialError, expected_password, parse_account};

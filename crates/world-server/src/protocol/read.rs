@@ -1,8 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
-use wow_srp::vanilla_header::{CLIENT_HEADER_LENGTH, HeaderCrypto};
+use wow_srp::vanilla_header::{CLIENT_HEADER_LENGTH, DecrypterHalf};
 use wow_world_messages::vanilla::opcode_to_name;
 use wow_world_messages::vanilla::opcodes::ClientOpcodeMessage;
 
@@ -17,13 +16,16 @@ pub enum Incoming {
     },
 }
 
-pub async fn read_incoming(
-    stream: &mut TcpStream,
-    encryption: &mut HeaderCrypto,
-) -> std::io::Result<Incoming> {
+pub async fn read_incoming<R>(
+    stream: &mut R,
+    decrypter: &mut DecrypterHalf,
+) -> std::io::Result<Incoming>
+where
+    R: AsyncReadExt + Unpin,
+{
     let mut header_bytes = [0_u8; CLIENT_HEADER_LENGTH as usize];
     stream.read_exact(&mut header_bytes).await?;
-    let header = encryption.decrypter().decrypt_client_header(header_bytes);
+    let header = decrypter.decrypt_client_header(header_bytes);
 
     let body_len = usize::from(header.size.saturating_sub(4));
     let mut body = vec![0_u8; body_len];
