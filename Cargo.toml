@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+wow-shared = { path = "crates/wow-shared" }
+auth-server = { path = "crates/auth-server" }
+world-server = { path = "crates/world-server" }
+
+anyhow = "1"
+axum = "0.8"
+dashmap = "6"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.53", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wow_login_messages = { version = "0.5", features = ["tokio"] }
+wow_srp = "0.7"
+wow_world_messages = { version = "0.3", features = ["vanilla", "tokio", "encryption", "sync"] }

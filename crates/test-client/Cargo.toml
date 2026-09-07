@@ -1,0 +1,20 @@
+[package]
+name = "test-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wow-shared.workspace = true
+wow_login_messages.workspace = true
+wow_srp.workspace = true
+wow_world_messages.workspace = true
+
+[dev-dependencies]
+auth-server.workspace = true
+reqwest.workspace = true
+world-server.workspace = true

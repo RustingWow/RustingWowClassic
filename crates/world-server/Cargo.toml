@@ -1,0 +1,15 @@
+[package]
+name = "world-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wow-shared.workspace = true
+wow_srp.workspace = true
+wow_world_messages.workspace = true
