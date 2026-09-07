@@ -1,0 +1,129 @@
+:root {
+  color-scheme: dark;
+  --bg: #12100e;
+  --card: #1c1814;
+  --ink: #f3ead7;
+  --muted: #b7a88c;
+  --line: #3a3228;
+  --gold: #d4a84b;
+  --danger: #e07a5f;
+  font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top, #2a231b 0%, var(--bg) 55%);
+  color: var(--ink);
+}
+
+.shell {
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 4rem;
+}
+
+header h1 {
+  margin: 0.15rem 0 0.6rem;
+  letter-spacing: 0.04em;
+}
+
+.kicker,
+.muted,
+.lede,
+.switch,
+.hint,
+dt {
+  color: var(--muted);
+}
+
+.lede,
+.hint {
+  line-height: 1.45;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.4rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.card h2 {
+  margin: 0;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+}
+
+input {
+  background: #100e0c;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  font: inherit;
+}
+
+button {
+  background: var(--gold);
+  color: #1a140c;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.7rem 1rem;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+button.link {
+  background: none;
+  color: var(--gold);
+  padding: 0;
+  font-weight: 600;
+}
+
+.banner {
+  background: #3a2018;
+  color: var(--danger);
+  border: 1px solid #6b3a2e;
+  border-radius: 8px;
+  padding: 0.7rem 0.85rem;
+}
+
+dl {
+  margin: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+dt {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+dd {
+  margin: 0.15rem 0 0;
+  font-size: 1.15rem;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}

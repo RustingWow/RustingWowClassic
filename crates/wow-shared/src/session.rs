@@ -5,6 +5,7 @@ pub const SESSION_KEY_LEN: usize = SESSION_KEY_LENGTH as usize;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
+    pub account_id: i64,
     pub account: String,
     #[serde(with = "session_key_serde")]
     pub session_key: [u8; SESSION_KEY_LEN],

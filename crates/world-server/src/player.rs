@@ -5,7 +5,7 @@ pub const PLAYER_DAMAGE: i32 = 12;
 pub const STAND_STATE_STAND: u8 = 0;
 pub const STAND_STATE_DEAD: u8 = 7;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Player {
     pub guid: u64,
     pub name: String,

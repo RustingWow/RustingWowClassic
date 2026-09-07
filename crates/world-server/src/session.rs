@@ -1,5 +1,5 @@
 use tokio::net::TcpStream;
-use wow_shared::{Account, CharacterTemplate, SessionInfo, parse_account};
+use wow_shared::{Account, CharacterTemplate, SessionInfo};
 use wow_srp::normalized_string::NormalizedString;
 use wow_srp::vanilla_header::{HeaderCrypto, ProofSeed};
 use wow_world_messages::vanilla::{
@@ -7,10 +7,13 @@ use wow_world_messages::vanilla::{
     SMSG_AUTH_CHALLENGE, SMSG_AUTH_RESPONSE, ServerMessage, tokio_expect_client_message,
 };
 
+use crate::map_handle::MapHandle;
 use crate::player::Player;
 use crate::protocol::action::ClientAction;
 use crate::protocol::{ClientConnection, ConnectionEvent};
-use crate::world::{PlayerMailbox, World, WorldPresence};
+use crate::router::{MapBackend, MapRouter, WorldPresence};
+use crate::rpc::MapSession;
+use crate::world::{ChatChannel, PlayerMailbox};
 
 struct AuthenticatedClient {
     stream: TcpStream,
@@ -22,7 +25,7 @@ pub async fn handle_client(
     stream: TcpStream,
     auth_internal_url: String,
     log_unhandled_packets: bool,
-    world: World,
+    router: MapRouter,
 ) -> anyhow::Result<()> {
     let Some(authenticated) = authenticate(stream, &auth_internal_url).await? else {
         return Ok(());
@@ -31,7 +34,7 @@ pub async fn handle_client(
 
     let character = CharacterTemplate::for_account(&authenticated.account);
     let connection = ClientConnection::new(authenticated.stream, authenticated.encryption);
-    run_session(connection, character, world, log_unhandled_packets).await
+    run_session(connection, character, router, log_unhandled_packets).await
 }
 
 async fn authenticate(
@@ -46,11 +49,15 @@ async fn authenticate(
     .await?;
 
     let auth = tokio_expect_client_message::<CMSG_AUTH_SESSION, _>(&mut stream).await?;
-    let account = parse_account(&auth.username)?;
-    let session = fetch_session(auth_internal_url, &account.username).await?;
+    let username = NormalizedString::new(&auth.username)?;
+    let session = fetch_session(auth_internal_url, username.as_ref()).await?;
+    let account = Account {
+        id: session.account_id,
+        username: session.account.clone(),
+    };
 
     let mut encryption = match seed.into_server_header_crypto(
-        &NormalizedString::new(&account.username)?,
+        &username,
         session.session_key,
         auth.client_proof,
         auth.client_seed,
@@ -118,7 +125,7 @@ async fn send_addon_info(
 async fn run_session(
     mut connection: ClientConnection,
     mut character: CharacterTemplate,
-    world: World,
+    router: MapRouter,
     log_unhandled_packets: bool,
 ) -> anyhow::Result<()> {
     let mailbox = connection.mailbox();
@@ -140,7 +147,7 @@ async fn run_session(
                     action,
                     &mut connection,
                     &mut character,
-                    &world,
+                    &router,
                     &mailbox,
                     &mut presence,
                     log_unhandled_packets,
@@ -162,7 +169,7 @@ async fn handle_action(
     action: ClientAction,
     connection: &mut ClientConnection,
     character: &mut CharacterTemplate,
-    world: &World,
+    router: &MapRouter,
     mailbox: &PlayerMailbox,
     presence: &mut Option<WorldPresence>,
     log_unhandled_packets: bool,
@@ -172,46 +179,56 @@ async fn handle_action(
         ClientAction::Ping { sequence_id } => connection.pong(sequence_id).await?,
         ClientAction::ListCharacters => connection.send_character_list(character).await?,
         ClientAction::EnterWorld { guid } => {
-            enter_world(connection, character, world, mailbox, presence, guid).await?;
+            enter_world(connection, character, router, mailbox, presence, guid).await?;
         }
-        ClientAction::QueryName { guid } => reply_name(connection, character, world, guid).await?,
+        ClientAction::QueryName { guid } => {
+            reply_name(connection, character, router, presence, guid).await?;
+        }
         ClientAction::QueryCreature { entry, guid } => {
-            reply_creature(connection, world, entry, guid).await?;
+            reply_creature(connection, presence, entry, guid).await?;
         }
         ClientAction::Select => {}
         ClientAction::Attack { guid } if in_world => {
-            world.start_attack(mailbox, character.guid, guid);
+            dispatch_attack(presence, mailbox, character.guid, guid).await?;
         }
         ClientAction::Attack { .. } => {}
         ClientAction::StopAttack if in_world => {
-            world.stop_attack(mailbox, character.guid);
+            dispatch_stop_attack(presence, mailbox, character.guid).await?;
         }
         ClientAction::StopAttack => {}
         ClientAction::ChangeStandState { state } if in_world => {
-            world.change_stand_state(mailbox, character.guid, state);
+            dispatch_stand(presence, mailbox, character.guid, state).await?;
         }
         ClientAction::ChangeStandState { .. } => {}
         ClientAction::GossipHello { guid } if in_world => {
-            world.open_gossip(mailbox, character.guid, guid);
+            dispatch_gossip_hello(presence, mailbox, character.guid, guid).await?;
         }
         ClientAction::GossipHello { .. } => {}
         ClientAction::GossipSelect { guid, option } if in_world => {
-            world.select_gossip_option(mailbox, character.guid, guid, option);
+            dispatch_gossip_select(presence, mailbox, character.guid, guid, option).await?;
         }
         ClientAction::GossipSelect { .. } => {}
         ClientAction::QueryNpcText { text_id } => {
-            let text = world.npc_text(text_id);
+            let text = npc_text(presence, text_id).await?;
             connection.reply_npc_text(text_id, text.as_deref()).await?;
         }
         ClientAction::Moved(pending) if in_world => {
             if let Some(movement) = pending.bind(character.guid) {
                 character.position = movement.position;
-                world.broadcast_move(mailbox, movement);
+                dispatch_move(presence, mailbox, movement).await?;
             }
         }
         ClientAction::Moved(_) => {}
         ClientAction::Chat(pending) if in_world => {
-            world.speak(mailbox, pending.bind(character.guid));
+            let chat = pending.bind(character.guid);
+            match &chat.channel {
+                ChatChannel::Whisper { to } => {
+                    router
+                        .directory()
+                        .whisper(mailbox, chat.speaker, to.clone(), chat.text);
+                }
+                _ => dispatch_speak(presence, mailbox, chat).await?,
+            }
         }
         ClientAction::Chat(_) => {}
         ClientAction::Ignored(ignored) => {
@@ -231,7 +248,7 @@ async fn handle_action(
 async fn enter_world(
     connection: &mut ClientConnection,
     character: &CharacterTemplate,
-    world: &World,
+    router: &MapRouter,
     mailbox: &PlayerMailbox,
     presence: &mut Option<WorldPresence>,
     guid: u64,
@@ -242,48 +259,242 @@ async fn enter_world(
     }
 
     connection.enter_world(character).await?;
-    let nearby = world.join(Player::from(character), mailbox.clone());
+    let player = Player::from(character);
+    let map_id = character.map_id;
+    let (others, creatures, backend) = open_map(router, map_id, player, mailbox.clone()).await?;
     *presence = Some(WorldPresence::new(
-        world.clone(),
+        router.directory().clone(),
         character.guid,
         mailbox.clone(),
+        backend,
     ));
-    connection.show_players(&nearby).await?;
-    let npcs = world.creatures();
-    connection.show_creatures(&npcs).await?;
+    connection.show_players(&others).await?;
+    connection.show_creatures(&creatures).await?;
     tracing::info!(
         name = %character.name,
-        nearby = nearby.len(),
-        npcs = npcs.len(),
+        map_id = presence.as_ref().map(WorldPresence::map_id),
+        nearby = others.len(),
+        npcs = creatures.len(),
         "player entered world"
     );
     Ok(())
 }
 
+async fn open_map(
+    router: &MapRouter,
+    map_id: u32,
+    player: Player,
+    mailbox: PlayerMailbox,
+) -> anyhow::Result<(Vec<Player>, Vec<crate::creature::Creature>, MapBackend)> {
+    if let Some(world) = router.map(map_id) {
+        let world = world.clone();
+        let result = router
+            .join(map_id, player, mailbox)
+            .ok_or_else(|| anyhow::anyhow!("map {map_id} missing"))?;
+        return Ok((result.others, result.creatures, MapBackend::Local(world)));
+    }
+    let addr = router
+        .endpoint(map_id)
+        .ok_or_else(|| anyhow::anyhow!("no shard for map {map_id}"))?;
+    let session = MapSession::connect(addr, map_id, mailbox.clone()).await?;
+    let (others, creatures) = session.join(player.clone()).await?;
+    router
+        .directory()
+        .register(player.guid, player.name, map_id, mailbox);
+    Ok((others, creatures, MapBackend::Remote(session)))
+}
+
 async fn reply_name(
     connection: &mut ClientConnection,
     character: &CharacterTemplate,
-    world: &World,
+    router: &MapRouter,
+    presence: &Option<WorldPresence>,
     guid: u64,
 ) -> anyhow::Result<()> {
-    let player = world
-        .player(guid)
-        .or_else(|| (guid == character.guid).then(|| Player::from(character)));
-    let Some(player) = player else {
-        return Ok(());
+    if let Some(player) = lookup_player(presence, guid).await? {
+        return connection.reply_name(guid, &player).await;
+    }
+    if let Some(name) = router.directory().name(guid) {
+        let player = Player::new(guid, name, character.position);
+        return connection.reply_name(guid, &player).await;
+    }
+    if guid == character.guid {
+        return connection.reply_name(guid, &Player::from(character)).await;
+    }
+    Ok(())
+}
+
+async fn lookup_player(
+    presence: &Option<WorldPresence>,
+    guid: u64,
+) -> anyhow::Result<Option<Player>> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(None);
     };
-    connection.reply_name(guid, &player).await
+    match backend {
+        MapBackend::Local(world) => Ok(MapHandle::player(world, guid)),
+        MapBackend::Remote(session) => session.player(guid).await,
+    }
 }
 
 async fn reply_creature(
     connection: &mut ClientConnection,
-    world: &World,
+    presence: &Option<WorldPresence>,
     entry: u32,
     guid: u64,
 ) -> anyhow::Result<()> {
-    let creature = world
-        .creature(guid)
-        .or_else(|| world.creature_by_entry(entry));
+    let creature = lookup_creature(presence, entry, guid).await?;
     let creature = creature.filter(|creature| creature.entry == entry);
     connection.reply_creature(entry, creature.as_ref()).await
+}
+
+async fn lookup_creature(
+    presence: &Option<WorldPresence>,
+    entry: u32,
+    guid: u64,
+) -> anyhow::Result<Option<crate::creature::Creature>> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(None);
+    };
+    match backend {
+        MapBackend::Local(world) => {
+            Ok(MapHandle::creature(world, guid)
+                .or_else(|| MapHandle::creature_by_entry(world, entry)))
+        }
+        MapBackend::Remote(session) => {
+            if let Some(creature) = session.creature(guid).await? {
+                return Ok(Some(creature));
+            }
+            session.creature_by_entry(entry).await
+        }
+    }
+}
+
+async fn npc_text(
+    presence: &Option<WorldPresence>,
+    text_id: u32,
+) -> anyhow::Result<Option<String>> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(None);
+    };
+    match backend {
+        MapBackend::Local(world) => Ok(MapHandle::npc_text(world, text_id)),
+        MapBackend::Remote(session) => session.npc_text(text_id).await,
+    }
+}
+
+async fn dispatch_move(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    movement: crate::world::Movement,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::broadcast_move(world, mailbox, movement),
+        MapBackend::Remote(session) => {
+            session
+                .broadcast_move(movement.guid, movement.position)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_speak(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    chat: crate::world::Chat,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::speak(world, mailbox, chat),
+        MapBackend::Remote(session) => session.speak(chat).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_attack(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    attacker: u64,
+    target: u64,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::start_attack(world, mailbox, attacker, target),
+        MapBackend::Remote(session) => session.start_attack(attacker, target).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_stop_attack(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    attacker: u64,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::stop_attack(world, mailbox, attacker),
+        MapBackend::Remote(session) => session.stop_attack(attacker).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_stand(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    guid: u64,
+    state: u8,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::change_stand_state(world, mailbox, guid, state),
+        MapBackend::Remote(session) => session.change_stand_state(guid, state).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_gossip_hello(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    player: u64,
+    npc: u64,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::open_gossip(world, mailbox, player, npc),
+        MapBackend::Remote(session) => session.open_gossip(player, npc).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_gossip_select(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    player: u64,
+    npc: u64,
+    option: u32,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => {
+            MapHandle::select_gossip_option(world, mailbox, player, npc, option)
+        }
+        MapBackend::Remote(session) => session.select_gossip_option(player, npc, option).await?,
+    }
+    Ok(())
 }

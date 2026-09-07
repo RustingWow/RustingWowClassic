@@ -1,8 +1,8 @@
 use super::*;
 use crate::creature::{
-    northshire_guard, northshire_guard_guid, northshire_wolf_guid, GUARD_GOSSIP_ACCEPT_ID,
-    GUARD_GOSSIP_ASK_ID, GUARD_GOSSIP_TEXT, GUARD_GOSSIP_TEXT_ID, GUARD_GOSSIP_WOLF_TEXT,
-    GUARD_GOSSIP_WOLF_TEXT_ID,
+    GUARD_GOSSIP_ACCEPT_ID, GUARD_GOSSIP_ASK_ID, GUARD_GOSSIP_TEXT, GUARD_GOSSIP_TEXT_ID,
+    GUARD_GOSSIP_WOLF_TEXT, GUARD_GOSSIP_WOLF_TEXT_ID, northshire_guard, northshire_guard_guid,
+    northshire_wolf_guid,
 };
 
 fn talking_to_guard() -> (World, PlayerMailbox, mpsc::UnboundedReceiver<WorldEvent>) {
@@ -54,12 +54,7 @@ fn asking_the_guard_opens_the_wolf_menu() {
 fn accepting_the_wolf_task_closes_gossip() {
     let (world, mailbox, mut rx) = talking_to_guard();
 
-    world.select_gossip_option(
-        &mailbox,
-        1,
-        northshire_guard_guid(),
-        GUARD_GOSSIP_ACCEPT_ID,
-    );
+    world.select_gossip_option(&mailbox, 1, northshire_guard_guid(), GUARD_GOSSIP_ACCEPT_ID);
 
     match rx.try_recv().expect("close") {
         WorldEvent::GossipClosed => {}

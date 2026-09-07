@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wow
+      POSTGRES_PASSWORD: wow
+      POSTGRES_DB: wow
+    ports:
+      - "5432:5432"
+    volumes:
+      - wow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wow -d wow"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  portal:
+    build:
+      context: ./web
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://wow:wow@postgres:5432/wow
+      JWT_SECRET: change-me
+      NODE_ENV: production
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  wow-postgres:

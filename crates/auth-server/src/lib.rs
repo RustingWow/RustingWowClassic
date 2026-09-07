@@ -1,3 +1,4 @@
+mod accounts;
 mod http;
 mod login;
 mod store;
@@ -9,10 +10,20 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use wow_shared::AuthConfig;
 
+use crate::accounts::AccountStore;
+
 pub async fn serve(config: AuthConfig) -> anyhow::Result<()> {
     let login_listener = TcpListener::bind(config.bind).await?;
     let http_listener = TcpListener::bind(config.internal_bind).await?;
-    serve_with_listeners(login_listener, http_listener, config.world_public_addr).await
+    let pool = accounts::connect_auth(&config.database_url).await?;
+    serve_with_store(
+        login_listener,
+        http_listener,
+        config.world_public_addr,
+        SessionStore::new(config.redis_url),
+        AccountStore::postgres(pool),
+    )
+    .await
 }
 
 pub async fn serve_with_listeners(
@@ -20,7 +31,23 @@ pub async fn serve_with_listeners(
     http_listener: TcpListener,
     world_public_addr: String,
 ) -> anyhow::Result<()> {
-    let store = SessionStore::new();
+    serve_with_store(
+        login_listener,
+        http_listener,
+        world_public_addr,
+        SessionStore::memory(),
+        AccountStore::memory_with_user1()?,
+    )
+    .await
+}
+
+async fn serve_with_store(
+    login_listener: TcpListener,
+    http_listener: TcpListener,
+    world_public_addr: String,
+    store: SessionStore,
+    accounts: AccountStore,
+) -> anyhow::Result<()> {
     let login_addr = login_listener.local_addr()?;
     let http_addr = http_listener.local_addr()?;
     tracing::info!(%login_addr, %http_addr, world = %world_public_addr, "auth-server listening");
@@ -28,6 +55,7 @@ pub async fn serve_with_listeners(
     let login = tokio::spawn(login::accept_loop(
         login_listener,
         store.clone(),
+        accounts,
         world_public_addr,
     ));
     let http = tokio::spawn(http::serve(http_listener, store));

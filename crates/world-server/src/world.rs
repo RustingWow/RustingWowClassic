@@ -3,18 +3,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use wow_shared::Position;
+use wow_shared::{MAP_EASTERN_KINGDOMS, Position};
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage;
 
-use crate::creature::{northshire_npcs, Creature, Gossip, GossipAction, GossipMenu, WOLF_DAMAGE};
-use crate::player::{Player, PLAYER_DAMAGE, STAND_STATE_DEAD};
+use crate::creature::{Creature, Gossip, GossipAction, GossipMenu, WOLF_DAMAGE, northshire_npcs};
+use crate::player::{PLAYER_DAMAGE, Player, STAND_STATE_DEAD};
 
 /// Movement already translated for nearby clients; the packet body stays private.
 #[derive(Clone, Debug)]
 pub struct Movement {
     pub guid: u64,
     pub position: Position,
-    packet: ServerOpcodeMessage,
+    packet: Option<ServerOpcodeMessage>,
 }
 
 impl Movement {
@@ -22,16 +22,24 @@ impl Movement {
         Self {
             guid,
             position,
-            packet,
+            packet: Some(packet),
         }
     }
 
-    pub(crate) fn packet(&self) -> &ServerOpcodeMessage {
-        &self.packet
+    pub fn without_packet(guid: u64, position: Position) -> Self {
+        Self {
+            guid,
+            position,
+            packet: None,
+        }
+    }
+
+    pub(crate) fn packet(&self) -> Option<&ServerOpcodeMessage> {
+        self.packet.as_ref()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChatChannel {
     Say,
     Yell,
@@ -39,14 +47,14 @@ pub enum ChatChannel {
     Whisper { to: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Chat {
     pub speaker: u64,
     pub channel: ChatChannel,
     pub text: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChatDelivery {
     Say,
     Yell,
@@ -55,20 +63,20 @@ pub enum ChatDelivery {
     WhisperInform,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SpokenChat {
     pub from_guid: u64,
     pub text: String,
     pub delivery: ChatDelivery,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attack {
     pub attacker: u64,
     pub victim: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MeleeHit {
     pub attacker: u64,
     pub victim: u64,
@@ -107,11 +115,11 @@ impl PlayerMailbox {
         (Self { tx }, rx)
     }
 
-    fn send(&self, event: WorldEvent) {
+    pub(crate) fn send(&self, event: WorldEvent) {
         let _ = self.tx.send(event);
     }
 
-    fn same_channel(&self, other: &Self) -> bool {
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
         self.tx.same_channel(&other.tx)
     }
 }
@@ -137,16 +145,21 @@ struct Inner {
     creatures: HashMap<u64, CreatureState>,
 }
 
-/// Shared in-world player list. Sessions hear about each other through mailboxes.
+/// One map's player list, creatures, and combat tick.
 #[derive(Clone)]
 pub struct World {
+    map_id: u32,
     inner: Arc<Mutex<Inner>>,
 }
 
 impl World {
     pub fn new() -> Self {
+        Self::for_map(MAP_EASTERN_KINGDOMS)
+    }
+
+    pub fn for_map(map_id: u32) -> Self {
         let now = Instant::now();
-        let creatures = northshire_npcs()
+        let creatures = creatures_for_map(map_id)
             .into_iter()
             .map(|creature| {
                 let damage = if creature.hostile { WOLF_DAMAGE } else { 0 };
@@ -164,6 +177,7 @@ impl World {
             })
             .collect();
         Self {
+            map_id,
             inner: Arc::new(Mutex::new(Inner {
                 players: HashMap::new(),
                 creatures,
@@ -171,7 +185,16 @@ impl World {
         }
     }
 
+    pub fn map_id(&self) -> u32 {
+        self.map_id
+    }
+
     pub fn join(&self, player: Player, mailbox: PlayerMailbox) -> Vec<Player> {
+        tracing::debug!(
+            map_id = self.map_id,
+            guid = player.guid,
+            "player joined map"
+        );
         let mut inner = self.inner.lock().expect("world mutex");
         if inner.players.remove(&player.guid).is_some() {
             broadcast(&inner, WorldEvent::PlayerLeft { guid: player.guid });
@@ -503,6 +526,14 @@ const GOSSIP_RANGE: f32 = 10.0;
 const SWING_INTERVAL: Duration = Duration::from_millis(2000);
 const RESPAWN_AFTER: Duration = Duration::from_secs(20);
 
+fn creatures_for_map(map_id: u32) -> Vec<Creature> {
+    if map_id == MAP_EASTERN_KINGDOMS {
+        northshire_npcs()
+    } else {
+        Vec::new()
+    }
+}
+
 fn broadcast_in_range(inner: &Inner, origin: Position, range: f32, spoken: SpokenChat) {
     let range_squared = range * range;
     let event = WorldEvent::Chat(spoken);
@@ -623,9 +654,7 @@ fn leash_creatures(inner: &mut Inner, events: &mut Vec<WorldEvent>) {
             });
             continue;
         };
-        if !player.player.is_alive()
-            || !in_range(state.home, player.player.position, LEASH_RANGE)
-        {
+        if !player.player.is_alive() || !in_range(state.home, player.player.position, LEASH_RANGE) {
             reset.push(state.creature.guid);
             stops.push(Attack {
                 attacker: state.creature.guid,
@@ -720,12 +749,7 @@ fn land_hit(
     }
 }
 
-fn apply_damage(
-    inner: &mut Inner,
-    attacker: u64,
-    victim: u64,
-    damage: i32,
-) -> Option<MeleeHit> {
+fn apply_damage(inner: &mut Inner, attacker: u64, victim: u64, damage: i32) -> Option<MeleeHit> {
     if let Some(creature) = inner.creatures.get_mut(&victim) {
         if creature.creature.dead {
             return None;
@@ -802,28 +826,6 @@ fn drop_combat_with(inner: &mut Inner, player_guid: u64) {
         if state.combat_target == Some(player_guid) {
             state.combat_target = None;
         }
-    }
-}
-
-pub struct WorldPresence {
-    world: World,
-    guid: u64,
-    mailbox: PlayerMailbox,
-}
-
-impl WorldPresence {
-    pub fn new(world: World, guid: u64, mailbox: PlayerMailbox) -> Self {
-        Self {
-            world,
-            guid,
-            mailbox,
-        }
-    }
-}
-
-impl Drop for WorldPresence {
-    fn drop(&mut self) {
-        self.world.leave(self.guid, &self.mailbox);
     }
 }
 

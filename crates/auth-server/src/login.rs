@@ -10,24 +10,27 @@ use wow_login_messages::version_3::{
     CMD_AUTH_LOGON_PROOF_Client, CMD_AUTH_LOGON_PROOF_Server, CMD_REALM_LIST_Client,
     CMD_REALM_LIST_Server, Realm, RealmFlag, RealmType,
 };
-use wow_shared::{SessionInfo, parse_account};
+use wow_shared::SessionInfo;
 use wow_srp::normalized_string::NormalizedString;
 use wow_srp::server::{SrpProof, SrpVerifier};
 use wow_srp::{GENERATOR, LARGE_SAFE_PRIME_LITTLE_ENDIAN, PublicKey};
 
+use crate::accounts::{AccountRecord, AccountStore};
 use crate::store::SessionStore;
 
 pub async fn accept_loop(
     listener: TcpListener,
     store: SessionStore,
+    accounts: AccountStore,
     world_public_addr: String,
 ) -> anyhow::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let store = store.clone();
+        let accounts = accounts.clone();
         let world_public_addr = world_public_addr.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_client(stream, store, world_public_addr).await {
+            if let Err(error) = handle_client(stream, store, accounts, world_public_addr).await {
                 tracing::warn!(%peer, %error, "auth session ended");
             }
         });
@@ -37,6 +40,7 @@ pub async fn accept_loop(
 async fn handle_client(
     mut stream: TcpStream,
     store: SessionStore,
+    accounts: AccountStore,
     world_public_addr: String,
 ) -> anyhow::Result<()> {
     let message = match tokio_read_initial_message(&mut stream).await {
@@ -50,7 +54,7 @@ async fn handle_client(
 
     match message {
         InitialMessage::Logon(challenge) => {
-            login(stream, challenge, store, world_public_addr).await
+            login(stream, challenge, store, accounts, world_public_addr).await
         }
         InitialMessage::Reconnect(_) => {
             tracing::debug!("reconnect is not implemented");
@@ -63,6 +67,7 @@ async fn login(
     mut stream: TcpStream,
     challenge: CMD_AUTH_LOGON_CHALLENGE_Client,
     store: SessionStore,
+    accounts: AccountStore,
     world_public_addr: String,
 ) -> anyhow::Result<()> {
     if !matches!(
@@ -75,9 +80,16 @@ async fn login(
         return Ok(());
     }
 
-    let account = match parse_account(&challenge.account_name) {
-        Ok(account) => account,
-        Err(_) => {
+    let account = match accounts.get_by_username(&challenge.account_name).await? {
+        Some(account) if account.locked => {
+            tracing::info!(account = %account.username, "locked account");
+            CMD_AUTH_LOGON_CHALLENGE_Server::FailBanned
+                .tokio_write(&mut stream)
+                .await?;
+            return Ok(());
+        }
+        Some(account) => account,
+        None => {
             tracing::info!(account = %challenge.account_name, "unknown account");
             CMD_AUTH_LOGON_CHALLENGE_Server::FailUnknownAccount
                 .tokio_write(&mut stream)
@@ -86,7 +98,7 @@ async fn login(
         }
     };
 
-    let proof = srp_proof(&account.username, &account.password)?;
+    let proof = srp_proof(&account)?;
     CMD_AUTH_LOGON_CHALLENGE_Server::Success {
         server_public_key: *proof.server_public_key(),
         generator: vec![GENERATOR],
@@ -124,6 +136,7 @@ async fn login(
     .await?;
 
     store.insert(SessionInfo {
+        account_id: account.id,
         account: account.username.clone(),
         session_key: *server.session_key(),
     });
@@ -132,10 +145,9 @@ async fn login(
     send_realm_list(&mut stream, &world_public_addr).await
 }
 
-fn srp_proof(username: &str, password: &str) -> anyhow::Result<SrpProof> {
-    let username = NormalizedString::new(username)?;
-    let password = NormalizedString::new(password)?;
-    Ok(SrpVerifier::from_username_and_password(username, password).into_proof())
+fn srp_proof(account: &AccountRecord) -> anyhow::Result<SrpProof> {
+    let username = NormalizedString::new(&account.username)?;
+    Ok(SrpVerifier::from_database_values(username, account.verifier, account.salt).into_proof())
 }
 
 async fn send_realm_list(stream: &mut TcpStream, world_public_addr: &str) -> anyhow::Result<()> {

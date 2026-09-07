@@ -1,0 +1,15 @@
+# Vanilla map_id list (loading-screen boundaries), not WoW zones.
+# Locally every map is in-process; `dedicated` only matters in the cluster.
+shards:
+  - maps: [0]
+    name: eastern-kingdoms
+    dedicated: true
+  - maps: [1]
+    name: kalimdor
+    dedicated: true
+  - maps: [369]
+    name: deeprun-tram
+    dedicated: false
+#  - maps: [36, 43, 389, 90]
+#    name: instances
+#    kind: instance

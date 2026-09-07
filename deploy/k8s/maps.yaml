@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: map-eastern-kingdoms
+spec:
+  ports:
+    - port: 9100
+      targetPort: 9100
+  selector:
+    app: map-eastern-kingdoms
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: map-eastern-kingdoms
+spec:
+  serviceName: map-eastern-kingdoms
+  replicas: 1
+  selector:
+    matchLabels:
+      app: map-eastern-kingdoms
+  template:
+    metadata:
+      labels:
+        app: map-eastern-kingdoms
+    spec:
+      containers:
+        - name: map-server
+          image: wowserver:latest
+          imagePullPolicy: IfNotPresent
+          command: ["map-server"]
+          env:
+            - name: MAP_BIND
+              value: "0.0.0.0:9100"
+            - name: MAP_IDS
+              value: "0"
+            - name: SHARDS_FILE
+              value: "/etc/wow/shards.yaml"
+          ports:
+            - containerPort: 9100
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: map-kalimdor
+spec:
+  ports:
+    - port: 9100
+      targetPort: 9100
+  selector:
+    app: map-kalimdor
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: map-kalimdor
+spec:
+  serviceName: map-kalimdor
+  replicas: 1
+  selector:
+    matchLabels:
+      app: map-kalimdor
+  template:
+    metadata:
+      labels:
+        app: map-kalimdor
+    spec:
+      containers:
+        - name: map-server
+          image: wowserver:latest
+          imagePullPolicy: IfNotPresent
+          command: ["map-server"]
+          env:
+            - name: MAP_BIND
+              value: "0.0.0.0:9100"
+            - name: MAP_IDS
+              value: "1"
+            - name: SHARDS_FILE
+              value: "/etc/wow/shards.yaml"
+          ports:
+            - containerPort: 9100

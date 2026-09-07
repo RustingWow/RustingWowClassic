@@ -45,26 +45,26 @@ pub struct Creature {
     pub gossip: Option<Gossip>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Gossip {
     pub menus: Vec<GossipMenu>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GossipMenu {
     pub text_id: u32,
     pub text: String,
     pub options: Vec<GossipOption>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GossipOption {
     pub id: u32,
     pub text: String,
     pub action: GossipAction,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GossipAction {
     Close,
     ShowMenu { text_id: u32 },

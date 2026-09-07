@@ -1,23 +1,23 @@
 use tokio::io::AsyncWriteExt;
-use wow_shared::CharacterTemplate;
+use wow_shared::{CharacterTemplate, MAP_KALIMDOR};
 use wow_srp::vanilla_header::EncrypterHalf;
 use wow_world_messages::Guid;
 use wow_world_messages::vanilla::{
     Area, Character, Class, CreatureFamily, DamageInfo, DateTime, Gender, GossipItem, HitInfo,
     Language, Level, Map, MovementBlock, MovementBlock_MovementFlags, MovementBlock_UpdateFlag,
     MovementBlock_UpdateFlag_All, MovementBlock_UpdateFlag_Living, NpcTextUpdate,
-    NpcTextUpdateEmote, Object, ObjectType, PlayerChatTag, Power, Race,
-    SMSG_ACCOUNT_DATA_TIMES, SMSG_ACTION_BUTTONS, SMSG_ATTACKSTART, SMSG_ATTACKSTOP,
-    SMSG_ATTACKERSTATEUPDATE, SMSG_BINDPOINTUPDATE, SMSG_CHAR_ENUM, SMSG_CHAT_PLAYER_NOT_FOUND,
-    SMSG_CREATURE_QUERY_RESPONSE, SMSG_CREATURE_QUERY_RESPONSE_found, SMSG_DESTROY_OBJECT,
-    SMSG_GOSSIP_COMPLETE, SMSG_GOSSIP_MESSAGE, SMSG_INITIAL_SPELLS, SMSG_INITIALIZE_FACTIONS,
-    SMSG_LOGIN_SETTIMESPEED, SMSG_LOGIN_VERIFY_WORLD, SMSG_MESSAGECHAT, SMSG_MESSAGECHAT_ChatType,
-    SMSG_NAME_QUERY_RESPONSE, SMSG_NPC_TEXT_UPDATE, SMSG_PONG, SMSG_STANDSTATE_UPDATE,
+    NpcTextUpdateEmote, Object, ObjectType, PlayerChatTag, Power, Race, SMSG_ACCOUNT_DATA_TIMES,
+    SMSG_ACTION_BUTTONS, SMSG_ATTACKERSTATEUPDATE, SMSG_ATTACKSTART, SMSG_ATTACKSTOP,
+    SMSG_BINDPOINTUPDATE, SMSG_CHAR_ENUM, SMSG_CHAT_PLAYER_NOT_FOUND, SMSG_CREATURE_QUERY_RESPONSE,
+    SMSG_CREATURE_QUERY_RESPONSE_found, SMSG_DESTROY_OBJECT, SMSG_GOSSIP_COMPLETE,
+    SMSG_GOSSIP_MESSAGE, SMSG_INITIAL_SPELLS, SMSG_INITIALIZE_FACTIONS, SMSG_LOGIN_SETTIMESPEED,
+    SMSG_LOGIN_VERIFY_WORLD, SMSG_MESSAGECHAT, SMSG_MESSAGECHAT_ChatType, SMSG_NAME_QUERY_RESPONSE,
+    SMSG_NEW_WORLD, SMSG_NPC_TEXT_UPDATE, SMSG_PONG, SMSG_STANDSTATE_UPDATE, SMSG_TRANSFER_PENDING,
     SMSG_TUTORIAL_FLAGS, SMSG_UPDATE_OBJECT, ServerMessage, UnitStandState, UpdateMask,
     UpdatePlayer, UpdateUnit,
 };
 
-use crate::creature::{is_creature_guid, Creature, GossipMenu};
+use crate::creature::{Creature, GossipMenu, is_creature_guid};
 use crate::player::Player;
 use crate::protocol::geometry::vector3d;
 use crate::world::{Attack, ChatDelivery, MeleeHit, SpokenChat};
@@ -65,7 +65,7 @@ where
             facial_hair: 0,
             level: Level::new_player(),
             area: Area::NorthshireValley,
-            map: Map::EasternKingdoms,
+            map: vanilla_map(character.map_id),
             position: vector3d(character.position),
             guild_id: 0,
             flags: Default::default(),
@@ -91,7 +91,7 @@ where
 {
     let position = vector3d(character.position);
     SMSG_LOGIN_VERIFY_WORLD {
-        map: Map::EasternKingdoms,
+        map: vanilla_map(character.map_id),
         position,
         orientation: character.position.orientation,
     }
@@ -135,7 +135,7 @@ where
 
     SMSG_BINDPOINTUPDATE {
         position,
-        map: Map::EasternKingdoms,
+        map: vanilla_map(character.map_id),
         area: Area::NorthshireValley,
     }
     .tokio_write_encrypted_server(&mut *stream, encrypter)
@@ -650,5 +650,39 @@ fn create_player_object(player: &Player, as_self: bool) -> Object {
         mask2: UpdateMask::Player(update_mask),
         movement2: MovementBlock { update_flag },
         object_type: ObjectType::Player,
+    }
+}
+
+#[allow(dead_code)]
+pub async fn transfer_world<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    map_id: u32,
+    position: wow_shared::Position,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    let map = vanilla_map(map_id);
+    SMSG_TRANSFER_PENDING {
+        map,
+        has_transport: Default::default(),
+    }
+    .tokio_write_encrypted_server(&mut *stream, encrypter)
+    .await?;
+    SMSG_NEW_WORLD {
+        map,
+        position: vector3d(position),
+        orientation: position.orientation,
+    }
+    .tokio_write_encrypted_server(stream, encrypter)
+    .await?;
+    Ok(())
+}
+
+fn vanilla_map(map_id: u32) -> Map {
+    match map_id {
+        MAP_KALIMDOR => Map::Kalimdor,
+        _ => Map::EasternKingdoms,
     }
 }

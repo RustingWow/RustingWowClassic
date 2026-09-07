@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+spec:
+  type: LoadBalancer
+  ports:
+    - name: login
+      port: 3724
+      targetPort: 3724
+      protocol: TCP
+  selector:
+    app: auth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-internal
+spec:
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+  selector:
+    app: auth
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      containers:
+        - name: auth
+          image: wowserver:latest
+          imagePullPolicy: IfNotPresent
+          command: ["auth-server"]
+          env:
+            - name: AUTH_BIND
+              value: "0.0.0.0:3724"
+            - name: AUTH_INTERNAL_BIND
+              value: "0.0.0.0:9090"
+            - name: WORLD_PUBLIC_ADDR
+              value: "gateway:8085"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+          ports:
+            - containerPort: 3724
+            - containerPort: 9090

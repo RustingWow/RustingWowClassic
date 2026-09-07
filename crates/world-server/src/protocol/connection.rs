@@ -88,6 +88,15 @@ impl ClientConnection {
         packets::enter_world(&mut self.writer, &mut self.encrypter, character).await
     }
 
+    #[allow(dead_code)]
+    pub async fn transfer_world(
+        &mut self,
+        map_id: u32,
+        position: wow_shared::Position,
+    ) -> anyhow::Result<()> {
+        packets::transfer_world(&mut self.writer, &mut self.encrypter, map_id, position).await
+    }
+
     pub async fn show_players(&mut self, players: &[Player]) -> anyhow::Result<()> {
         packets::appear(&mut self.writer, &mut self.encrypter, players, false).await
     }
@@ -167,8 +176,10 @@ impl ClientConnection {
     }
 
     async fn replay_movement(&mut self, movement: Movement) -> anyhow::Result<()> {
-        movement
-            .packet()
+        let Some(packet) = movement.packet() else {
+            return Ok(());
+        };
+        packet
             .tokio_write_encrypted_server(&mut self.writer, &mut self.encrypter)
             .await?;
         Ok(())

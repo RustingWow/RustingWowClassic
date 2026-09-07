@@ -11,7 +11,7 @@ use wow_login_messages::version_3::{
     CMD_AUTH_LOGON_PROOF_Client_SecurityFlag, CMD_AUTH_LOGON_PROOF_Server, CMD_REALM_LIST_Client,
     CMD_REALM_LIST_Server,
 };
-use wow_shared::{SESSION_KEY_LEN, parse_account};
+use wow_shared::SESSION_KEY_LEN;
 use wow_srp::PublicKey;
 use wow_srp::client::SrpClientChallenge;
 use wow_srp::normalized_string::NormalizedString;
@@ -35,23 +35,23 @@ pub async fn enter_world(
     username: &str,
     password: &str,
 ) -> anyhow::Result<EnterWorldResult> {
-    let account = parse_account(username)?;
-    account.verify_password(password)?;
+    let username = username.trim().to_ascii_uppercase();
+    if username.is_empty() {
+        anyhow::bail!("username is empty");
+    }
 
     let mut auth = TcpStream::connect(auth_addr).await?;
-    let (session_key, realms) =
-        authenticate(&mut auth, &account.username, &account.password).await?;
+    let (session_key, realms) = authenticate(&mut auth, &username, password).await?;
     let realm = realms
         .realms
         .first()
         .ok_or_else(|| anyhow::anyhow!("auth server returned an empty realm list"))?;
 
     let mut world = TcpStream::connect(&realm.address).await?;
-    let character_name =
-        world_login(&mut world, &account.username, session_key, realm.realm_id).await?;
+    let character_name = world_login(&mut world, &username, session_key, realm.realm_id).await?;
 
     Ok(EnterWorldResult {
-        account: account.username,
+        account: username,
         character_name,
         realm_address: realm.address.clone(),
     })

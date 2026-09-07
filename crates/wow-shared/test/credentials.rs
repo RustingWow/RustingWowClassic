@@ -1,19 +1,15 @@
 use super::*;
 
 #[test]
-fn accepts_user_n_pairs() {
-    let account = parse_account("user1").unwrap();
-    assert_eq!(account.number, 1);
-    assert_eq!(account.username, "USER1");
-    assert_eq!(account.password, "PASS1");
-    account.verify_password("pass1").unwrap();
-    account.verify_password("PASS1").unwrap();
+fn normalizes_alphanumeric_names() {
+    assert_eq!(normalize_username("alice").unwrap(), "ALICE");
+    assert_eq!(normalize_username("User1").unwrap(), "USER1");
 }
 
 #[test]
-fn rejects_unknown_names() {
-    assert!(parse_account("admin").is_err());
-    assert!(parse_account("user").is_err());
-    assert!(parse_account("user0").is_err());
-    assert!(parse_account("user01").is_err());
+fn rejects_invalid_names() {
+    assert!(normalize_username("a").is_err());
+    assert!(normalize_username("thisusernameistoolong").is_err());
+    assert!(normalize_username("user_name").is_err());
+    assert!(normalize_username("").is_err());
 }
