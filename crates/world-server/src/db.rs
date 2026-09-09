@@ -1,7 +1,7 @@
 use sqlx::postgres::PgPoolOptions;
-use sqlx::Executor;
+use sqlx::{Executor, PgPool};
 
-pub async fn migrate(database_url: &str) -> anyhow::Result<()> {
+pub async fn connect_world(database_url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .after_connect(|conn, _meta| {
             Box::pin(async move {
@@ -12,7 +12,7 @@ pub async fn migrate(database_url: &str) -> anyhow::Result<()> {
         })
         .connect(database_url)
         .await?;
+    // `migrate!` embeds SQL at compile time; build.rs watches ./migrations for new files.
     sqlx::migrate!("./migrations").run(&pool).await?;
-    pool.close().await;
-    Ok(())
+    Ok(pool)
 }

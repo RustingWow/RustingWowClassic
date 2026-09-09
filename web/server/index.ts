@@ -6,8 +6,20 @@ import staticFiles from "@fastify/static";
 import Fastify from "fastify";
 
 import "./env.ts";
-import { login, logout, me, register } from "./auth.ts";
-import { pool } from "./db.ts";
+import { login, logout, me, register, siteConfig } from "./auth.ts";
+import { getChangelog } from "./changelog.ts";
+import { ensureWebSchema, pool } from "./db.ts";
+import {
+  createComment,
+  createTopic,
+  deleteComment,
+  deleteTopic,
+  getTopic,
+  listTopics,
+  unvoteTopic,
+  updateTopic,
+  voteTopic,
+} from "./ideas.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const isProduction = process.env.NODE_ENV === "production";
@@ -25,10 +37,23 @@ app.setErrorHandler((error, _request, reply) => {
 });
 
 app.get("/api/health", async () => ({ ok: true }));
+app.get("/api/site", async () => siteConfig());
 app.post("/api/register", register);
 app.post("/api/login", login);
 app.post("/api/logout", logout);
 app.get("/api/me", me);
+app.get("/api/changelog", getChangelog);
+app.get("/api/topics", listTopics);
+app.post("/api/topics", createTopic);
+app.get("/api/topics/:id", getTopic);
+app.patch("/api/topics/:id", updateTopic);
+app.delete("/api/topics/:id", deleteTopic);
+app.put("/api/topics/:id/vote", voteTopic);
+app.delete("/api/topics/:id/vote", unvoteTopic);
+app.post("/api/topics/:id/comments", createComment);
+app.delete("/api/comments/:id", deleteComment);
+
+await ensureWebSchema();
 
 if (isProduction) {
   const dist = path.join(root, "dist");

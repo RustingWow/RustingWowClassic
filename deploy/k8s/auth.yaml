@@ -48,6 +48,8 @@ spec:
               value: "0.0.0.0:3724"
             - name: AUTH_INTERNAL_BIND
               value: "0.0.0.0:9090"
+            - name: AUTH_INTERNAL_TOKEN
+              value: "change-me"
             - name: WORLD_PUBLIC_ADDR
               value: "gateway:8085"
             - name: REDIS_URL

@@ -1,4 +1,5 @@
 mod character;
+mod character_enums;
 mod config;
 mod credentials;
 mod map;
@@ -7,7 +8,11 @@ mod shards;
 mod tracing_init;
 
 pub use character::{
-    CharacterTemplate, NORTHSHIRE_ORIENTATION, NORTHSHIRE_X, NORTHSHIRE_Y, NORTHSHIRE_Z, Position,
+    Appearance, CharacterTemplate, NORTHSHIRE_ORIENTATION, NORTHSHIRE_X, NORTHSHIRE_Y,
+    NORTHSHIRE_Z, Position,
+};
+pub use character_enums::{
+    CharacterArea, CharacterClass, CharacterGender, CharacterMap, CharacterRace, DbEnum,
 };
 pub use config::{AuthConfig, WorldConfig, WorldRole};
 pub use credentials::{Account, CredentialError, normalize_username};

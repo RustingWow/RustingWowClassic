@@ -14,6 +14,7 @@ auth-server = { path = "crates/auth-server" }
 world-server = { path = "crates/world-server" }
 
 anyhow = "1"
+argon2 = "0.5"
 axum = "0.8"
 dashmap = "6"
 redis = { version = "0.32", features = ["tokio-comp"] }
@@ -28,4 +29,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wow_login_messages = { version = "0.5", features = ["tokio"] }
 wow_srp = "0.7"
+wow_world_base = { version = "0.3", default-features = false, features = ["vanilla", "serde", "print-testcase"] }
 wow_world_messages = { version = "0.3", features = ["vanilla", "tokio", "encryption", "sync"] }

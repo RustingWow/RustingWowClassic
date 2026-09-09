@@ -1,22 +1,25 @@
 use tokio::io::AsyncWriteExt;
-use wow_shared::{CharacterTemplate, MAP_KALIMDOR};
+use wow_shared::{CharacterMap, CharacterTemplate};
 use wow_srp::vanilla_header::EncrypterHalf;
 use wow_world_messages::Guid;
 use wow_world_messages::vanilla::{
-    Area, Character, Class, CreatureFamily, DamageInfo, DateTime, Gender, GossipItem, HitInfo,
-    Language, Level, Map, MovementBlock, MovementBlock_MovementFlags, MovementBlock_UpdateFlag,
-    MovementBlock_UpdateFlag_All, MovementBlock_UpdateFlag_Living, NpcTextUpdate,
-    NpcTextUpdateEmote, Object, ObjectType, PlayerChatTag, Power, Race, SMSG_ACCOUNT_DATA_TIMES,
-    SMSG_ACTION_BUTTONS, SMSG_ATTACKERSTATEUPDATE, SMSG_ATTACKSTART, SMSG_ATTACKSTOP,
-    SMSG_BINDPOINTUPDATE, SMSG_CHAR_ENUM, SMSG_CHAT_PLAYER_NOT_FOUND, SMSG_CREATURE_QUERY_RESPONSE,
-    SMSG_CREATURE_QUERY_RESPONSE_found, SMSG_DESTROY_OBJECT, SMSG_GOSSIP_COMPLETE,
-    SMSG_GOSSIP_MESSAGE, SMSG_INITIAL_SPELLS, SMSG_INITIALIZE_FACTIONS, SMSG_LOGIN_SETTIMESPEED,
-    SMSG_LOGIN_VERIFY_WORLD, SMSG_MESSAGECHAT, SMSG_MESSAGECHAT_ChatType, SMSG_NAME_QUERY_RESPONSE,
-    SMSG_NEW_WORLD, SMSG_NPC_TEXT_UPDATE, SMSG_PONG, SMSG_STANDSTATE_UPDATE, SMSG_TRANSFER_PENDING,
-    SMSG_TUTORIAL_FLAGS, SMSG_UPDATE_OBJECT, ServerMessage, UnitStandState, UpdateMask,
-    UpdatePlayer, UpdateUnit,
+    Character, Class, CreatureFamily, DamageInfo, DateTime, Gender, GossipItem, HitInfo, Language,
+    Level, LogoutResult, LogoutSpeed, MovementBlock, MovementBlock_MovementFlags,
+    MovementBlock_UpdateFlag, MovementBlock_UpdateFlag_All, MovementBlock_UpdateFlag_Living,
+    NpcTextUpdate, NpcTextUpdateEmote, Object, ObjectType, PlayerChatTag, Power, Race,
+    SMSG_ACCOUNT_DATA_TIMES, SMSG_ACTION_BUTTONS, SMSG_ATTACKERSTATEUPDATE, SMSG_ATTACKSTART,
+    SMSG_ATTACKSTOP, SMSG_BINDPOINTUPDATE, SMSG_CHAR_CREATE, SMSG_CHAR_DELETE, SMSG_CHAR_ENUM,
+    SMSG_CHAT_PLAYER_NOT_FOUND, SMSG_CREATURE_QUERY_RESPONSE, SMSG_CREATURE_QUERY_RESPONSE_found,
+    SMSG_DESTROY_OBJECT, SMSG_GOSSIP_COMPLETE, SMSG_GOSSIP_MESSAGE, SMSG_INITIAL_SPELLS,
+    SMSG_INITIALIZE_FACTIONS, SMSG_LOGIN_SETTIMESPEED, SMSG_LOGIN_VERIFY_WORLD,
+    SMSG_LOGOUT_CANCEL_ACK, SMSG_LOGOUT_COMPLETE, SMSG_LOGOUT_RESPONSE, SMSG_MESSAGECHAT,
+    SMSG_MESSAGECHAT_ChatType, SMSG_NAME_QUERY_RESPONSE, SMSG_NEW_WORLD, SMSG_NPC_TEXT_UPDATE,
+    SMSG_PONG, SMSG_STANDSTATE_UPDATE, SMSG_TRANSFER_PENDING, SMSG_TUTORIAL_FLAGS,
+    SMSG_UPDATE_OBJECT, ServerMessage, UnitStandState, UpdateMask, UpdatePlayer, UpdateUnit,
+    WorldResult,
 };
 
+use crate::appearance::{class, gender, power, race};
 use crate::creature::{Creature, GossipMenu, is_creature_guid};
 use crate::player::Player;
 use crate::protocol::geometry::vector3d;
@@ -26,8 +29,6 @@ const UNIT_FLAG_NON_ATTACKABLE: i32 = 0x0000_0002;
 const UNIT_FLAG_IMMUNE_TO_PC: i32 = 0x0000_0100;
 const UNIT_DYNFLAG_DEAD: i32 = 0x20;
 const STAND_STATE_DEAD: u8 = 7;
-
-const HUMAN_MALE_DISPLAY_ID: i32 = 49;
 
 pub async fn pong<W>(
     stream: &mut W,
@@ -46,39 +47,109 @@ where
 pub async fn character_list<W>(
     stream: &mut W,
     encrypter: &mut EncrypterHalf,
-    character: &CharacterTemplate,
+    characters: &[CharacterTemplate],
 ) -> anyhow::Result<()>
 where
     W: AsyncWriteExt + Unpin + Send,
 {
     SMSG_CHAR_ENUM {
-        characters: vec![Character {
-            guid: Guid::new(character.guid),
-            name: character.name.clone(),
-            race: Race::Human,
-            class: Class::Warrior,
-            gender: Gender::Male,
-            skin: 0,
-            face: 0,
-            hair_style: 0,
-            hair_color: 0,
-            facial_hair: 0,
-            level: Level::new_player(),
-            area: Area::NorthshireValley,
-            map: vanilla_map(character.map_id),
-            position: vector3d(character.position),
-            guild_id: 0,
-            flags: Default::default(),
-            first_login: false,
-            pet_display_id: 0,
-            pet_level: Level::zero(),
-            pet_family: CreatureFamily::None,
-            equipment: [Default::default(); 19],
-        }],
+        characters: characters.iter().map(enum_character).collect(),
     }
     .tokio_write_encrypted_server(stream, encrypter)
     .await?;
     Ok(())
+}
+
+pub async fn char_create<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    result: WorldResult,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_CHAR_CREATE { result }
+        .tokio_write_encrypted_server(stream, encrypter)
+        .await?;
+    Ok(())
+}
+
+pub async fn char_delete<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    result: WorldResult,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_CHAR_DELETE { result }
+        .tokio_write_encrypted_server(stream, encrypter)
+        .await?;
+    Ok(())
+}
+
+pub async fn logout_response<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    result: LogoutResult,
+    speed: LogoutSpeed,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_LOGOUT_RESPONSE { result, speed }
+        .tokio_write_encrypted_server(stream, encrypter)
+        .await?;
+    Ok(())
+}
+
+pub async fn logout_complete<W>(stream: &mut W, encrypter: &mut EncrypterHalf) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_LOGOUT_COMPLETE {}
+        .tokio_write_encrypted_server(stream, encrypter)
+        .await?;
+    Ok(())
+}
+
+pub async fn logout_cancel_ack<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_LOGOUT_CANCEL_ACK {}
+        .tokio_write_encrypted_server(stream, encrypter)
+        .await?;
+    Ok(())
+}
+
+fn enum_character(character: &CharacterTemplate) -> Character {
+    Character {
+        guid: Guid::new(character.guid),
+        name: character.name.clone(),
+        race: race(character.race),
+        class: class(character.class),
+        gender: gender(character.gender),
+        skin: character.appearance.skin,
+        face: character.appearance.face,
+        hair_style: character.appearance.hair_style,
+        hair_color: character.appearance.hair_color,
+        facial_hair: character.appearance.facial_hair,
+        level: Level::new_player(),
+        area: character.area,
+        map: character.map_id,
+        position: vector3d(character.position),
+        guild_id: 0,
+        flags: Default::default(),
+        first_login: character.first_login,
+        pet_display_id: 0,
+        pet_level: Level::zero(),
+        pet_family: CreatureFamily::None,
+        equipment: [Default::default(); 19],
+    }
 }
 
 pub async fn enter_world<W>(
@@ -91,7 +162,7 @@ where
 {
     let position = vector3d(character.position);
     SMSG_LOGIN_VERIFY_WORLD {
-        map: vanilla_map(character.map_id),
+        map: character.map_id,
         position,
         orientation: character.position.orientation,
     }
@@ -135,8 +206,8 @@ where
 
     SMSG_BINDPOINTUPDATE {
         position,
-        map: vanilla_map(character.map_id),
-        area: Area::NorthshireValley,
+        map: character.map_id,
+        area: character.area,
     }
     .tokio_write_encrypted_server(&mut *stream, encrypter)
     .await?;
@@ -197,9 +268,9 @@ where
         guid: Guid::new(guid),
         character_name: player.name.clone(),
         realm_name: String::new(),
-        race: Race::Human,
-        gender: Gender::Male,
-        class: Class::Warrior,
+        race: race(player.race),
+        gender: gender(player.gender),
+        class: class(player.class),
     }
     .tokio_write_encrypted_server(stream, encrypter)
     .await?;
@@ -610,14 +681,26 @@ fn create_player_object(player: &Player, as_self: bool) -> Object {
     let position = vector3d(player.position);
     let mut update = UpdatePlayer::builder()
         .set_object_guid(guid)
-        .set_unit_bytes_0(Race::Human, Class::Warrior, Gender::Male, Power::Rage)
+        .set_unit_bytes_0(
+            race(player.race),
+            class(player.class),
+            gender(player.gender),
+            power(player.class),
+        )
         .set_object_scale_x(1.0)
         .set_unit_health(player.health)
         .set_unit_maxhealth(player.max_health)
         .set_unit_level(1)
-        .set_unit_factiontemplate(1)
-        .set_unit_displayid(HUMAN_MALE_DISPLAY_ID)
-        .set_unit_nativedisplayid(HUMAN_MALE_DISPLAY_ID)
+        .set_unit_factiontemplate(player.faction)
+        .set_unit_displayid(player.display_id)
+        .set_unit_nativedisplayid(player.display_id)
+        .set_player_features(
+            player.appearance.skin,
+            player.appearance.face,
+            player.appearance.hair_style,
+            player.appearance.hair_color,
+        )
+        .set_player_bytes_2(player.appearance.facial_hair, 0, 0, 0)
         .set_unit_bytes_1(player.stand_state, 0, 0, 0);
     if player.health <= 0 {
         update = update
@@ -657,13 +740,13 @@ fn create_player_object(player: &Player, as_self: bool) -> Object {
 pub async fn transfer_world<W>(
     stream: &mut W,
     encrypter: &mut EncrypterHalf,
-    map_id: u32,
+    map_id: CharacterMap,
     position: wow_shared::Position,
 ) -> anyhow::Result<()>
 where
     W: AsyncWriteExt + Unpin + Send,
 {
-    let map = vanilla_map(map_id);
+    let map = map_id;
     SMSG_TRANSFER_PENDING {
         map,
         has_transport: Default::default(),
@@ -678,11 +761,4 @@ where
     .tokio_write_encrypted_server(stream, encrypter)
     .await?;
     Ok(())
-}
-
-fn vanilla_map(map_id: u32) -> Map {
-    match map_id {
-        MAP_KALIMDOR => Map::Kalimdor,
-        _ => Map::EasternKingdoms,
-    }
 }

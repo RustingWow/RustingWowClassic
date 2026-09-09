@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 axum.workspace = true
 dashmap.workspace = true
 redis.workspace = true
@@ -18,3 +19,6 @@ tracing.workspace = true
 wow-shared.workspace = true
 wow_login_messages.workspace = true
 wow_srp.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true

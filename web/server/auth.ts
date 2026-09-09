@@ -114,10 +114,7 @@ export async function login(
 }
 
 export async function logout(_request: FastifyRequest, reply: FastifyReply) {
-  return reply
-    .clearCookie(SESSION_COOKIE, { path: "/" })
-    .code(204)
-    .send();
+  return reply.clearCookie(SESSION_COOKIE, { path: "/" }).code(204).send();
 }
 
 export async function me(request: FastifyRequest, reply: FastifyReply) {
@@ -148,6 +145,56 @@ export async function me(request: FastifyRequest, reply: FastifyReply) {
     id: Number(account.id),
     username: account.username,
     email: account.email,
+  };
+}
+
+export type SessionAccount = {
+  id: number;
+  username: string;
+};
+
+export async function optionalAccount(
+  request: FastifyRequest,
+): Promise<SessionAccount | null> {
+  const token = request.cookies[SESSION_COOKIE];
+  if (!token) {
+    return null;
+  }
+  let payload: TokenPayload;
+  try {
+    payload = jwt.verify(token, JWT_SECRET) as TokenPayload;
+  } catch {
+    return null;
+  }
+  await assertAuthSchema();
+  const result = await pool.query<{ id: string; username: string }>(
+    `SELECT id, username FROM auth.accounts WHERE id = $1`,
+    [payload.sub],
+  );
+  const account = result.rows[0];
+  if (!account) {
+    return null;
+  }
+  return { id: Number(account.id), username: account.username };
+}
+
+export async function requireAccount(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<SessionAccount | null> {
+  const account = await optionalAccount(request);
+  if (!account) {
+    await reply.code(401).send({ error: "Not signed in." });
+    return null;
+  }
+  return account;
+}
+
+export function siteConfig() {
+  return {
+    discordInviteUrl:
+      process.env.DISCORD_INVITE_URL ?? "https://discord.gg/your-invite",
+    realmlistHost: process.env.REALMLIST_HOST ?? "127.0.0.1",
   };
 }
 

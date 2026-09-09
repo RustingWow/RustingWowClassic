@@ -1,0 +1,34 @@
+# git-cliff: release notes from conventional commits on develop.
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = ""
+body = """
+{%- if commits | length > 0 %}
+{%- for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits -%}
+- {{ commit.message | split(pat="\n") | first | trim }}
+{% endfor %}
+{% endfor -%}
+{% endif -%}
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+protect_breaking_commits = false
+split_commits = false
+topo_order = false
+sort_commits = "newest"
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^doc", group = "Docs" },
+  { message = "^refactor", group = "Refactors" },
+  { message = "^chore|^ci|^test|^style", skip = true },
+  { message = ".*", group = "Other" },
+]

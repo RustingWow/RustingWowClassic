@@ -1,22 +1,58 @@
 use wow_world_messages::vanilla::opcodes::ClientOpcodeMessage;
 use wow_world_messages::vanilla::{CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType};
 
+use wow_shared::{Appearance, CharacterClass, CharacterGender, CharacterRace};
+
 use crate::protocol::read::Incoming;
 use crate::world::{Chat, ChatChannel, Movement};
 
 pub enum ClientAction {
-    Ping { sequence_id: u32 },
+    Ping {
+        sequence_id: u32,
+    },
     ListCharacters,
-    EnterWorld { guid: u64 },
-    QueryName { guid: u64 },
-    QueryCreature { entry: u32, guid: u64 },
+    CreateCharacter {
+        name: String,
+        race: CharacterRace,
+        class: CharacterClass,
+        gender: CharacterGender,
+        appearance: Appearance,
+    },
+    CreateCharacterRejected,
+    DeleteCharacter {
+        guid: u64,
+    },
+    EnterWorld {
+        guid: u64,
+    },
+    QueryName {
+        guid: u64,
+    },
+    QueryCreature {
+        entry: u32,
+        guid: u64,
+    },
     Select,
-    Attack { guid: u64 },
+    Attack {
+        guid: u64,
+    },
     StopAttack,
-    ChangeStandState { state: u8 },
-    GossipHello { guid: u64 },
-    GossipSelect { guid: u64, option: u32 },
-    QueryNpcText { text_id: u32 },
+    ChangeStandState {
+        state: u8,
+    },
+    GossipHello {
+        guid: u64,
+    },
+    GossipSelect {
+        guid: u64,
+        option: u32,
+    },
+    QueryNpcText {
+        text_id: u32,
+    },
+    LogoutRequest,
+    PlayerLogout,
+    LogoutCancel,
     Moved(PendingMove),
     Chat(PendingChat),
     Ignored(IgnoredAction),
@@ -64,6 +100,31 @@ impl From<Incoming> for ClientAction {
                     sequence_id: ping.sequence_id,
                 },
                 ClientOpcodeMessage::CMSG_CHAR_ENUM => Self::ListCharacters,
+                ClientOpcodeMessage::CMSG_CHAR_CREATE(create) => {
+                    match (
+                        CharacterRace::from_protocol(create.race.as_int()),
+                        CharacterClass::from_protocol(create.class.as_int()),
+                        CharacterGender::from_protocol(create.gender.as_int()),
+                    ) {
+                        (Some(race), Some(class), Some(gender)) => Self::CreateCharacter {
+                            name: create.name.clone(),
+                            race,
+                            class,
+                            gender,
+                            appearance: Appearance {
+                                skin: create.skin_color,
+                                face: create.face,
+                                hair_style: create.hair_style,
+                                hair_color: create.hair_color,
+                                facial_hair: create.facial_hair,
+                            },
+                        },
+                        _ => Self::CreateCharacterRejected,
+                    }
+                }
+                ClientOpcodeMessage::CMSG_CHAR_DELETE(delete) => Self::DeleteCharacter {
+                    guid: delete.guid.guid(),
+                },
                 ClientOpcodeMessage::CMSG_PLAYER_LOGIN(login) => Self::EnterWorld {
                     guid: login.guid.guid(),
                 },
@@ -92,6 +153,9 @@ impl From<Incoming> for ClientAction {
                 ClientOpcodeMessage::CMSG_NPC_TEXT_QUERY(query) => Self::QueryNpcText {
                     text_id: query.text_id,
                 },
+                ClientOpcodeMessage::CMSG_LOGOUT_REQUEST => Self::LogoutRequest,
+                ClientOpcodeMessage::CMSG_PLAYER_LOGOUT => Self::PlayerLogout,
+                ClientOpcodeMessage::CMSG_LOGOUT_CANCEL => Self::LogoutCancel,
                 ClientOpcodeMessage::CMSG_MESSAGECHAT(message) => {
                     match chat_from_client(*message) {
                         Some(chat) => Self::Chat(chat),

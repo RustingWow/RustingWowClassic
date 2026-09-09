@@ -22,6 +22,7 @@ pub async fn serve(config: AuthConfig) -> anyhow::Result<()> {
         config.world_public_addr,
         SessionStore::new(config.redis_url),
         AccountStore::postgres(pool),
+        config.internal_token,
     )
     .await
 }
@@ -37,6 +38,7 @@ pub async fn serve_with_listeners(
         world_public_addr,
         SessionStore::memory(),
         AccountStore::memory_with_user1()?,
+        None,
     )
     .await
 }
@@ -47,6 +49,7 @@ async fn serve_with_store(
     world_public_addr: String,
     store: SessionStore,
     accounts: AccountStore,
+    internal_token: Option<String>,
 ) -> anyhow::Result<()> {
     let login_addr = login_listener.local_addr()?;
     let http_addr = http_listener.local_addr()?;
@@ -55,10 +58,10 @@ async fn serve_with_store(
     let login = tokio::spawn(login::accept_loop(
         login_listener,
         store.clone(),
-        accounts,
+        accounts.clone(),
         world_public_addr,
     ));
-    let http = tokio::spawn(http::serve(http_listener, store));
+    let http = tokio::spawn(http::serve(http_listener, store, accounts, internal_token));
 
     tokio::select! {
         result = login => result??,

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::credentials::Account;
-use crate::map::MAP_EASTERN_KINGDOMS;
+use crate::character_enums::{
+    CharacterArea, CharacterClass, CharacterGender, CharacterMap, CharacterRace,
+};
 
 pub const NORTHSHIRE_X: f32 = -8949.95;
 pub const NORTHSHIRE_Y: f32 = -132.493;
@@ -24,14 +25,6 @@ impl Position {
         orientation: NORTHSHIRE_ORIENTATION,
     };
 
-    pub fn northshire_for_account(account_id: i64) -> Self {
-        let offset = u32::try_from(account_id.max(1)).unwrap_or(u32::MAX);
-        Self {
-            y: NORTHSHIRE_Y + offset.saturating_sub(1) as f32 * 3.0,
-            ..Self::NORTHSHIRE
-        }
-    }
-
     pub fn distance_squared(self, other: Self) -> f32 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
@@ -40,22 +33,25 @@ impl Position {
     }
 }
 
-/// Hardcoded Human Warrior spawned at Northshire Abbey.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Appearance {
+    pub skin: u8,
+    pub face: u8,
+    pub hair_style: u8,
+    pub hair_color: u8,
+    pub facial_hair: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CharacterTemplate {
     pub guid: u64,
     pub name: String,
-    pub map_id: u32,
+    pub race: CharacterRace,
+    pub class: CharacterClass,
+    pub gender: CharacterGender,
+    pub appearance: Appearance,
+    pub map_id: CharacterMap,
     pub position: Position,
-}
-
-impl CharacterTemplate {
-    pub fn for_account(account: &Account) -> Self {
-        Self {
-            guid: account.id as u64,
-            name: format!("User{}", account.id),
-            map_id: MAP_EASTERN_KINGDOMS,
-            position: Position::northshire_for_account(account.id),
-        }
-    }
+    pub area: CharacterArea,
+    pub first_login: bool,
 }

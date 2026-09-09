@@ -31,7 +31,7 @@ async fn user1_reaches_login_verify_world() {
         .expect("enter world");
 
     assert_eq!(result.account, "USER1");
-    assert_eq!(result.character_name, "User1");
+    assert_eq!(result.character_name, "Userone");
     assert_eq!(result.realm_address, world_addr.to_string());
 }
 

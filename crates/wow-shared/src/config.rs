@@ -19,6 +19,7 @@ pub struct AuthConfig {
     pub world_public_addr: String,
     pub redis_url: Option<String>,
     pub database_url: String,
+    pub internal_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,7 @@ impl AuthConfig {
                 .unwrap_or_else(|_| "127.0.0.1:8085".to_string()),
             redis_url: optional_env("REDIS_URL"),
             database_url: required_env("DATABASE_URL")?,
+            internal_token: optional_env("AUTH_INTERNAL_TOKEN"),
         })
     }
 }

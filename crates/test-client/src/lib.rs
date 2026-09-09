@@ -12,15 +12,16 @@ use wow_login_messages::version_3::{
     CMD_REALM_LIST_Server,
 };
 use wow_shared::SESSION_KEY_LEN;
+use wow_srp::vanilla_header::HeaderCrypto;
 use wow_srp::PublicKey;
 use wow_srp::client::SrpClientChallenge;
 use wow_srp::normalized_string::NormalizedString;
 use wow_srp::vanilla_header::ProofSeed;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage;
 use wow_world_messages::vanilla::{
-    AddonInfo, CMSG_AUTH_SESSION, CMSG_CHAR_ENUM, CMSG_PLAYER_LOGIN, ClientMessage,
-    SMSG_AUTH_CHALLENGE, SMSG_AUTH_RESPONSE, tokio_expect_server_message,
-    tokio_expect_server_message_encryption,
+    AddonInfo, CMSG_AUTH_SESSION, CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_PLAYER_LOGIN, Character,
+    Class, ClientMessage, Gender, Race, SMSG_AUTH_CHALLENGE, SMSG_AUTH_RESPONSE, WorldResult,
+    tokio_expect_server_message, tokio_expect_server_message_encryption,
 };
 
 #[derive(Debug)]
@@ -174,13 +175,36 @@ async fn world_login(
         .await?;
 
     // The server may send SMSG_ADDON_INFO before CHAR_ENUM; skip until we see characters.
-    let characters = loop {
-        let opcode =
-            ServerOpcodeMessage::tokio_read_encrypted(&mut *stream, crypto.decrypter()).await?;
-        if let ServerOpcodeMessage::SMSG_CHAR_ENUM(message) = opcode {
-            break message.characters;
+    let mut characters = read_character_enum(stream, &mut crypto).await?;
+    if characters.is_empty() {
+        CMSG_CHAR_CREATE {
+            name: "Userone".to_string(),
+            race: Race::Human,
+            class: Class::Warrior,
+            gender: Gender::Male,
+            skin_color: 0,
+            face: 0,
+            hair_style: 0,
+            hair_color: 0,
+            facial_hair: 0,
         }
-    };
+        .tokio_write_encrypted_client(&mut *stream, crypto.encrypter())
+        .await?;
+        loop {
+            let opcode =
+                ServerOpcodeMessage::tokio_read_encrypted(&mut *stream, crypto.decrypter()).await?;
+            if let ServerOpcodeMessage::SMSG_CHAR_CREATE(message) = opcode {
+                if message.result != WorldResult::CharCreateSuccess {
+                    anyhow::bail!("character create failed: {:?}", message.result);
+                }
+                break;
+            }
+        }
+        CMSG_CHAR_ENUM {}
+            .tokio_write_encrypted_client(&mut *stream, crypto.encrypter())
+            .await?;
+        characters = read_character_enum(stream, &mut crypto).await?;
+    }
 
     let character = characters
         .first()
@@ -198,6 +222,19 @@ async fn world_login(
             ServerOpcodeMessage::tokio_read_encrypted(&mut *stream, crypto.decrypter()).await?;
         if matches!(opcode, ServerOpcodeMessage::SMSG_LOGIN_VERIFY_WORLD(_)) {
             return Ok(name);
+        }
+    }
+}
+
+async fn read_character_enum(
+    stream: &mut TcpStream,
+    crypto: &mut HeaderCrypto,
+) -> anyhow::Result<Vec<Character>> {
+    loop {
+        let opcode =
+            ServerOpcodeMessage::tokio_read_encrypted(&mut *stream, crypto.decrypter()).await?;
+        if let ServerOpcodeMessage::SMSG_CHAR_ENUM(message) = opcode {
+            return Ok(message.characters);
         }
     }
 }

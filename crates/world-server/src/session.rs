@@ -1,12 +1,19 @@
+use std::time::Duration;
+
 use tokio::net::TcpStream;
-use wow_shared::{Account, CharacterTemplate, SessionInfo};
+use wow_shared::{
+    Account, Appearance, CharacterClass, CharacterGender, CharacterMap, CharacterRace,
+    CharacterTemplate, DbEnum, SessionInfo,
+};
 use wow_srp::normalized_string::NormalizedString;
 use wow_srp::vanilla_header::{HeaderCrypto, ProofSeed};
 use wow_world_messages::vanilla::{
     Addon, Addon_InfoBlock, Addon_UrlInfo, AddonType, CMSG_AUTH_SESSION, SMSG_ADDON_INFO,
-    SMSG_AUTH_CHALLENGE, SMSG_AUTH_RESPONSE, ServerMessage, tokio_expect_client_message,
+    SMSG_AUTH_CHALLENGE, SMSG_AUTH_RESPONSE, ServerMessage, WorldResult,
+    tokio_expect_client_message,
 };
 
+use crate::character_store::{CharacterDraft, CharacterStore, CreateCharacterError};
 use crate::map_handle::MapHandle;
 use crate::player::Player;
 use crate::protocol::action::ClientAction;
@@ -14,6 +21,8 @@ use crate::protocol::{ClientConnection, ConnectionEvent};
 use crate::router::{MapBackend, MapRouter, WorldPresence};
 use crate::rpc::MapSession;
 use crate::world::{ChatChannel, PlayerMailbox};
+
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
 struct AuthenticatedClient {
     stream: TcpStream,
@@ -26,15 +35,22 @@ pub async fn handle_client(
     auth_internal_url: String,
     log_unhandled_packets: bool,
     router: MapRouter,
+    characters: CharacterStore,
 ) -> anyhow::Result<()> {
     let Some(authenticated) = authenticate(stream, &auth_internal_url).await? else {
         return Ok(());
     };
     tracing::info!(account = %authenticated.account.username, "world session authenticated");
 
-    let character = CharacterTemplate::for_account(&authenticated.account);
     let connection = ClientConnection::new(authenticated.stream, authenticated.encryption);
-    run_session(connection, character, router, log_unhandled_packets).await
+    run_session(
+        connection,
+        authenticated.account,
+        characters,
+        router,
+        log_unhandled_packets,
+    )
+    .await
 }
 
 async fn authenticate(
@@ -124,51 +140,85 @@ async fn send_addon_info(
 
 async fn run_session(
     mut connection: ClientConnection,
-    mut character: CharacterTemplate,
+    account: Account,
+    characters: CharacterStore,
     router: MapRouter,
     log_unhandled_packets: bool,
 ) -> anyhow::Result<()> {
     let mailbox = connection.mailbox();
     let mut presence: Option<WorldPresence> = None;
+    let mut character: Option<CharacterTemplate> = None;
+    let mut autosave = tokio::time::interval_at(
+        tokio::time::Instant::now() + AUTOSAVE_INTERVAL,
+        AUTOSAVE_INTERVAL,
+    );
 
     let result = loop {
-        match connection.next().await {
-            ConnectionEvent::Disconnected => {
-                tracing::debug!(name = %character.name, "client disconnected");
-                break Ok(());
-            }
-            ConnectionEvent::World(event) => {
-                if let Err(error) = connection.apply(event).await {
-                    break Err(error);
+        tokio::select! {
+            event = connection.next() => match event {
+                ConnectionEvent::Disconnected => {
+                    tracing::debug!(account = %account.username, "client disconnected");
+                    break Ok(());
                 }
-            }
-            ConnectionEvent::Action(action) => {
-                if let Err(error) = handle_action(
-                    action,
-                    &mut connection,
-                    &mut character,
-                    &router,
-                    &mailbox,
-                    &mut presence,
-                    log_unhandled_packets,
-                )
-                .await
+                ConnectionEvent::World(event) => {
+                    if let Err(error) = connection.apply(event).await {
+                        break Err(error);
+                    }
+                }
+                ConnectionEvent::Action(action) => {
+                    if let Err(error) = handle_action(
+                        action,
+                        &mut connection,
+                        &account,
+                        &characters,
+                        &mut character,
+                        &router,
+                        &mailbox,
+                        &mut presence,
+                        log_unhandled_packets,
+                    )
+                    .await
+                    {
+                        break Err(error);
+                    }
+                }
+            },
+            _ = autosave.tick() => {
+                if let Err(error) = persist_position(&characters, character.as_ref(), presence.as_ref()).await
                 {
-                    break Err(error);
+                    tracing::warn!(account = %account.username, %error, "character autosave failed");
                 }
             }
         }
     };
 
+    let save = persist_position(&characters, character.as_ref(), presence.as_ref()).await;
     drop(presence);
     connection.close();
-    result
+    result.and(save)
+}
+
+async fn persist_position(
+    store: &CharacterStore,
+    character: Option<&CharacterTemplate>,
+    presence: Option<&WorldPresence>,
+) -> anyhow::Result<()> {
+    let (Some(character), Some(presence)) = (character, presence) else {
+        return Ok(());
+    };
+    let map_id = CharacterMap::from_protocol(presence.map_id())
+        .ok_or_else(|| anyhow::anyhow!("unknown map {}", presence.map_id()))?;
+    store
+        .save_position(character.guid, map_id, character.position)
+        .await
 }
 
 async fn handle_action(
     action: ClientAction,
     connection: &mut ClientConnection,
-    character: &mut CharacterTemplate,
+    account: &Account,
+    store: &CharacterStore,
+    character: &mut Option<CharacterTemplate>,
     router: &MapRouter,
     mailbox: &PlayerMailbox,
     presence: &mut Option<WorldPresence>,
@@ -177,35 +227,83 @@ async fn handle_action(
     let in_world = presence.is_some();
     match action {
         ClientAction::Ping { sequence_id } => connection.pong(sequence_id).await?,
-        ClientAction::ListCharacters => connection.send_character_list(character).await?,
-        ClientAction::EnterWorld { guid } => {
-            enter_world(connection, character, router, mailbox, presence, guid).await?;
+        ClientAction::ListCharacters => {
+            let list = store.list(account.id).await?;
+            connection.send_character_list(&list).await?;
         }
+        ClientAction::CreateCharacter {
+            name,
+            race,
+            class,
+            gender,
+            appearance,
+        } => {
+            create_character(
+                connection, store, account.id, name, race, class, gender, appearance,
+            )
+            .await?;
+        }
+        ClientAction::CreateCharacterRejected => {
+            connection
+                .char_create(WorldResult::CharCreateDisabled)
+                .await?;
+        }
+        ClientAction::DeleteCharacter { guid } => {
+            delete_character(connection, store, account.id, guid, character, presence).await?;
+        }
+        ClientAction::EnterWorld { guid } => {
+            enter_world(
+                connection, store, account, character, router, mailbox, presence, guid,
+            )
+            .await?;
+        }
+        ClientAction::LogoutRequest | ClientAction::PlayerLogout => {
+            leave_world(connection, store, character, presence).await?;
+        }
+        ClientAction::LogoutCancel => connection.logout_cancel_ack().await?,
         ClientAction::QueryName { guid } => {
-            reply_name(connection, character, router, presence, guid).await?;
+            reply_name(
+                connection,
+                store,
+                character.as_ref(),
+                router,
+                presence,
+                guid,
+            )
+            .await?;
         }
         ClientAction::QueryCreature { entry, guid } => {
             reply_creature(connection, presence, entry, guid).await?;
         }
         ClientAction::Select => {}
         ClientAction::Attack { guid } if in_world => {
-            dispatch_attack(presence, mailbox, character.guid, guid).await?;
+            if let Some(character) = character.as_ref() {
+                dispatch_attack(presence, mailbox, character.guid, guid).await?;
+            }
         }
         ClientAction::Attack { .. } => {}
         ClientAction::StopAttack if in_world => {
-            dispatch_stop_attack(presence, mailbox, character.guid).await?;
+            if let Some(character) = character.as_ref() {
+                dispatch_stop_attack(presence, mailbox, character.guid).await?;
+            }
         }
         ClientAction::StopAttack => {}
         ClientAction::ChangeStandState { state } if in_world => {
-            dispatch_stand(presence, mailbox, character.guid, state).await?;
+            if let Some(character) = character.as_ref() {
+                dispatch_stand(presence, mailbox, character.guid, state).await?;
+            }
         }
         ClientAction::ChangeStandState { .. } => {}
         ClientAction::GossipHello { guid } if in_world => {
-            dispatch_gossip_hello(presence, mailbox, character.guid, guid).await?;
+            if let Some(character) = character.as_ref() {
+                dispatch_gossip_hello(presence, mailbox, character.guid, guid).await?;
+            }
         }
         ClientAction::GossipHello { .. } => {}
         ClientAction::GossipSelect { guid, option } if in_world => {
-            dispatch_gossip_select(presence, mailbox, character.guid, guid, option).await?;
+            if let Some(character) = character.as_ref() {
+                dispatch_gossip_select(presence, mailbox, character.guid, guid, option).await?;
+            }
         }
         ClientAction::GossipSelect { .. } => {}
         ClientAction::QueryNpcText { text_id } => {
@@ -213,21 +311,25 @@ async fn handle_action(
             connection.reply_npc_text(text_id, text.as_deref()).await?;
         }
         ClientAction::Moved(pending) if in_world => {
-            if let Some(movement) = pending.bind(character.guid) {
-                character.position = movement.position;
-                dispatch_move(presence, mailbox, movement).await?;
+            if let Some(character) = character.as_mut() {
+                if let Some(movement) = pending.bind(character.guid) {
+                    character.position = movement.position;
+                    dispatch_move(presence, mailbox, movement).await?;
+                }
             }
         }
         ClientAction::Moved(_) => {}
         ClientAction::Chat(pending) if in_world => {
-            let chat = pending.bind(character.guid);
-            match &chat.channel {
-                ChatChannel::Whisper { to } => {
-                    router
-                        .directory()
-                        .whisper(mailbox, chat.speaker, to.clone(), chat.text);
+            if let Some(character) = character.as_ref() {
+                let chat = pending.bind(character.guid);
+                match &chat.channel {
+                    ChatChannel::Whisper { to } => {
+                        router
+                            .directory()
+                            .whisper(mailbox, chat.speaker, to.clone(), chat.text);
+                    }
+                    _ => dispatch_speak(presence, mailbox, chat).await?,
                 }
-                _ => dispatch_speak(presence, mailbox, chat).await?,
             }
         }
         ClientAction::Chat(_) => {}
@@ -245,38 +347,110 @@ async fn handle_action(
     Ok(())
 }
 
+async fn create_character(
+    connection: &mut ClientConnection,
+    store: &CharacterStore,
+    account_id: i64,
+    name: String,
+    race: CharacterRace,
+    class: CharacterClass,
+    gender: CharacterGender,
+    appearance: Appearance,
+) -> anyhow::Result<()> {
+    let result = match store
+        .create(CharacterDraft {
+            account_id,
+            name,
+            race,
+            class,
+            gender,
+            appearance,
+        })
+        .await
+    {
+        Ok(_) => WorldResult::CharCreateSuccess,
+        Err(CreateCharacterError::InvalidName) => WorldResult::CharCreateError,
+        Err(CreateCharacterError::NameInUse) => WorldResult::CharCreateNameInUse,
+        Err(CreateCharacterError::AccountLimit) => WorldResult::CharCreateAccountLimit,
+        Err(CreateCharacterError::Disabled) => WorldResult::CharCreateDisabled,
+        Err(CreateCharacterError::Store(error)) => {
+            tracing::warn!(%error, "character create failed");
+            WorldResult::CharCreateError
+        }
+    };
+    connection.char_create(result).await
+}
+
+async fn delete_character(
+    connection: &mut ClientConnection,
+    store: &CharacterStore,
+    account_id: i64,
+    guid: u64,
+    character: &Option<CharacterTemplate>,
+    presence: &Option<WorldPresence>,
+) -> anyhow::Result<()> {
+    let in_world = presence.is_some() && character.as_ref().is_some_and(|c| c.guid == guid);
+    let result = if in_world {
+        WorldResult::CharDeleteFailed
+    } else if store.delete(account_id, guid).await? {
+        WorldResult::CharDeleteSuccess
+    } else {
+        WorldResult::CharDeleteFailed
+    };
+    connection.char_delete(result).await
+}
+
+async fn leave_world(
+    connection: &mut ClientConnection,
+    store: &CharacterStore,
+    character: &mut Option<CharacterTemplate>,
+    presence: &mut Option<WorldPresence>,
+) -> anyhow::Result<()> {
+    persist_position(store, character.as_ref(), presence.as_ref()).await?;
+    *presence = None;
+    *character = None;
+    connection.logout_to_character_screen().await
+}
+
 async fn enter_world(
     connection: &mut ClientConnection,
-    character: &CharacterTemplate,
+    store: &CharacterStore,
+    account: &Account,
+    character: &mut Option<CharacterTemplate>,
     router: &MapRouter,
     mailbox: &PlayerMailbox,
     presence: &mut Option<WorldPresence>,
     guid: u64,
 ) -> anyhow::Result<()> {
-    if guid != character.guid {
-        tracing::warn!(guid, "unknown character guid");
+    if presence.is_some() {
         return Ok(());
     }
+    let Some(loaded) = store.get(account.id, guid).await? else {
+        tracing::warn!(guid, account = %account.username, "unknown character guid");
+        return Ok(());
+    };
 
-    connection.enter_world(character).await?;
-    let player = Player::from(character);
-    let map_id = character.map_id;
+    connection.enter_world(&loaded).await?;
+    let player = Player::from(&loaded);
+    let map_id = loaded.map_id.as_protocol();
     let (others, creatures, backend) = open_map(router, map_id, player, mailbox.clone()).await?;
     *presence = Some(WorldPresence::new(
         router.directory().clone(),
-        character.guid,
+        loaded.guid,
         mailbox.clone(),
         backend,
     ));
     connection.show_players(&others).await?;
     connection.show_creatures(&creatures).await?;
     tracing::info!(
-        name = %character.name,
+        name = %loaded.name,
         map_id = presence.as_ref().map(WorldPresence::map_id),
         nearby = others.len(),
         npcs = creatures.len(),
         "player entered world"
     );
+    store.mark_entered_world(loaded.guid).await?;
+    *character = Some(loaded);
     Ok(())
 }
 
@@ -306,7 +480,8 @@ async fn open_map(
 
 async fn reply_name(
     connection: &mut ClientConnection,
-    character: &CharacterTemplate,
+    store: &CharacterStore,
+    character: Option<&CharacterTemplate>,
     router: &MapRouter,
     presence: &Option<WorldPresence>,
     guid: u64,
@@ -314,11 +489,17 @@ async fn reply_name(
     if let Some(player) = lookup_player(presence, guid).await? {
         return connection.reply_name(guid, &player).await;
     }
+    if let Some(stored) = store.get_by_guid(guid).await? {
+        return connection.reply_name(guid, &Player::from(&stored)).await;
+    }
     if let Some(name) = router.directory().name(guid) {
-        let player = Player::new(guid, name, character.position);
+        let position = character
+            .map(|character| character.position)
+            .unwrap_or(wow_shared::Position::NORTHSHIRE);
+        let player = Player::new(guid, name, position);
         return connection.reply_name(guid, &player).await;
     }
-    if guid == character.guid {
+    if let Some(character) = character.filter(|character| character.guid == guid) {
         return connection.reply_name(guid, &Player::from(character)).await;
     }
     Ok(())

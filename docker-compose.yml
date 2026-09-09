@@ -30,6 +30,10 @@ services:
       JWT_SECRET: change-me
       NODE_ENV: production
       PORT: "3000"
+      DISCORD_INVITE_URL: https://discord.gg/your-invite
+      REALMLIST_HOST: 127.0.0.1
+      GITHUB_REPO: RustingWow/RustingWowClassic
+      GITHUB_CHANGELOG_BRANCH: develop
     depends_on:
       postgres:
         condition: service_healthy

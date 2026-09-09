@@ -1,0 +1,28 @@
+---
+description: Conventional commit messages so changelog and release notes stay accurate
+alwaysApply: true
+---
+
+# Commit messages
+
+When the user asks to commit, write a **conventional commit** from the actual diff:
+
+- `feat:` user-facing capability (portal page, packet, NPC, API)
+- `fix:` bug fix
+- `docs:` README, comments, copy
+- `refactor:` no behavior change
+- `chore:` deps, lockfiles, tooling
+- `test:` tests only
+- `ci:` GitHub Actions
+
+Scope optional: `feat(web):`, `fix(auth):`, `feat(world):`.
+
+Subject: imperative, ~72 chars, say **why** not a file list. Body only if the diff needs context.
+
+Examples:
+
+- `feat(web): add ideas board with votes and comments`
+- `fix(web): allow DELETE without a JSON body`
+- `feat(world): send gossip menus for Northshire guards`
+
+These prefixes are how `/changelog` and GitHub Releases group Features vs Bug fixes.

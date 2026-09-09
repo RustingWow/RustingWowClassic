@@ -1,6 +1,6 @@
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use wow_shared::CharacterTemplate;
+use wow_shared::{CharacterMap, CharacterTemplate};
 use wow_srp::vanilla_header::{EncrypterHalf, HeaderCrypto};
 
 use crate::creature::Creature;
@@ -79,9 +79,38 @@ impl ClientConnection {
 
     pub async fn send_character_list(
         &mut self,
-        character: &CharacterTemplate,
+        characters: &[CharacterTemplate],
     ) -> anyhow::Result<()> {
-        packets::character_list(&mut self.writer, &mut self.encrypter, character).await
+        packets::character_list(&mut self.writer, &mut self.encrypter, characters).await
+    }
+
+    pub async fn char_create(
+        &mut self,
+        result: wow_world_messages::vanilla::WorldResult,
+    ) -> anyhow::Result<()> {
+        packets::char_create(&mut self.writer, &mut self.encrypter, result).await
+    }
+
+    pub async fn char_delete(
+        &mut self,
+        result: wow_world_messages::vanilla::WorldResult,
+    ) -> anyhow::Result<()> {
+        packets::char_delete(&mut self.writer, &mut self.encrypter, result).await
+    }
+
+    pub async fn logout_to_character_screen(&mut self) -> anyhow::Result<()> {
+        packets::logout_response(
+            &mut self.writer,
+            &mut self.encrypter,
+            wow_world_messages::vanilla::LogoutResult::Success,
+            wow_world_messages::vanilla::LogoutSpeed::Instant,
+        )
+        .await?;
+        packets::logout_complete(&mut self.writer, &mut self.encrypter).await
+    }
+
+    pub async fn logout_cancel_ack(&mut self) -> anyhow::Result<()> {
+        packets::logout_cancel_ack(&mut self.writer, &mut self.encrypter).await
     }
 
     pub async fn enter_world(&mut self, character: &CharacterTemplate) -> anyhow::Result<()> {
@@ -91,7 +120,7 @@ impl ClientConnection {
     #[allow(dead_code)]
     pub async fn transfer_world(
         &mut self,
-        map_id: u32,
+        map_id: CharacterMap,
         position: wow_shared::Position,
     ) -> anyhow::Result<()> {
         packets::transfer_world(&mut self.writer, &mut self.encrypter, map_id, position).await

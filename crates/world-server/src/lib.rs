@@ -1,9 +1,12 @@
+mod appearance;
+mod character_store;
 mod creature;
 mod db;
 mod directory;
 mod map_handle;
 mod player;
 mod protocol;
+mod race_starts;
 mod router;
 mod rpc;
 mod session;
@@ -15,18 +18,22 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use wow_shared::{ShardFile, WorldConfig, WorldRole};
 
+use crate::character_store::CharacterStore;
 use crate::directory::Directory;
 use crate::map_handle::MapHandle;
 use crate::router::MapRouter;
 use crate::world::World;
 
 pub async fn serve(config: WorldConfig) -> anyhow::Result<()> {
-    db::migrate(&config.database_url).await?;
     match config.role {
-        WorldRole::Map => serve_map_role(config).await,
+        WorldRole::Map => {
+            let _pool = db::connect_world(&config.database_url).await?;
+            serve_map_role(config).await
+        }
         WorldRole::Gateway | WorldRole::Combined => {
+            let pool = db::connect_world(&config.database_url).await?;
             let listener = TcpListener::bind(config.bind).await?;
-            serve_gateway_role(listener, config).await
+            serve_gateway_role(listener, config, CharacterStore::postgres(pool)).await
         }
     }
 }
@@ -48,10 +55,14 @@ pub async fn serve_with_listener(
         redis_url: None,
         database_url: String::new(),
     };
-    serve_gateway_role(listener, config).await
+    serve_gateway_role(listener, config, CharacterStore::memory()).await
 }
 
-async fn serve_gateway_role(listener: TcpListener, config: WorldConfig) -> anyhow::Result<()> {
+async fn serve_gateway_role(
+    listener: TcpListener,
+    config: WorldConfig,
+    characters: CharacterStore,
+) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     tracing::info!(
         %addr,
@@ -70,10 +81,16 @@ async fn serve_gateway_role(listener: TcpListener, config: WorldConfig) -> anyho
         let auth_internal_url = config.auth_internal_url.clone();
         let log_unhandled_packets = config.log_unhandled_packets;
         let router = router.clone();
+        let characters = characters.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                session::handle_client(stream, auth_internal_url, log_unhandled_packets, router)
-                    .await
+            if let Err(error) = session::handle_client(
+                stream,
+                auth_internal_url,
+                log_unhandled_packets,
+                router,
+                characters,
+            )
+            .await
             {
                 tracing::warn!(%peer, %error, "world session ended");
             }
