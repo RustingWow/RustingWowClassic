@@ -4,3 +4,4 @@ node_modules
 dist
 .env
 web/dist
+db/.classicdb-cache.sql.gz

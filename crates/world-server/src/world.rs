@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -6,8 +6,10 @@ use tokio::sync::mpsc;
 use wow_shared::{MAP_EASTERN_KINGDOMS, Position};
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage;
 
-use crate::creature::{Creature, Gossip, GossipAction, GossipMenu, WOLF_DAMAGE, northshire_npcs};
+use crate::catalog::{Catalog, ItemRow, VendorListing};
+use crate::creature::{Creature, Gossip, GossipAction, GossipMenu, northshire_npcs};
 use crate::player::{PLAYER_DAMAGE, Player, STAND_STATE_DEAD};
+use crate::quest_director::{QuestDirector, TaskSpec};
 
 /// Movement already translated for nearby clients; the packet body stays private.
 #[derive(Clone, Debug)]
@@ -102,6 +104,32 @@ pub enum WorldEvent {
     PlayerStandState { guid: u64, state: u8 },
     GossipOpened { npc: u64, menu: GossipMenu },
     GossipClosed,
+    VendorOpened { npc: u64, items: Vec<VendorOffer> },
+    LootOpened { guid: u64, gold: u32, items: Vec<LootOffer> },
+    LootTaken { index: u8 },
+    LootClosed { guid: u64 },
+    MoneyChanged { guid: u64, copper: u32 },
+    CreatureMoved {
+        guid: u64,
+        from: Position,
+        to: Position,
+        duration_ms: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VendorOffer {
+    pub item_id: u32,
+    pub display_id: u32,
+    pub max_items: u32,
+    pub price: u32,
+    pub max_durability: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LootOffer {
+    pub index: u8,
+    pub item_id: u32,
 }
 
 #[derive(Clone)]
@@ -129,6 +157,9 @@ struct Presence {
     mailbox: PlayerMailbox,
     attacking: Option<u64>,
     next_swing: Instant,
+    visible: HashSet<u64>,
+    last_cell: (i32, i32),
+    looting: Option<u64>,
 }
 
 struct CreatureState {
@@ -143,6 +174,8 @@ struct CreatureState {
 struct Inner {
     players: HashMap<u64, Presence>,
     creatures: HashMap<u64, CreatureState>,
+    grid: HashMap<(i32, i32), HashSet<u64>>,
+    loot: HashMap<u64, Vec<(u32, u32)>>,
 }
 
 /// One map's player list, creatures, and combat tick.
@@ -150,6 +183,7 @@ struct Inner {
 pub struct World {
     map_id: u32,
     inner: Arc<Mutex<Inner>>,
+    catalog: Option<Arc<Catalog>>,
 }
 
 impl World {
@@ -158,11 +192,35 @@ impl World {
     }
 
     pub fn for_map(map_id: u32) -> Self {
+        Self::with_creatures(map_id, creatures_for_map(map_id), None)
+    }
+
+    pub fn with_catalog(map_id: u32, catalog: Arc<Catalog>) -> Self {
+        let creatures = catalog.creatures_for_map(map_id);
+        let creatures = if creatures.is_empty() {
+            creatures_for_map(map_id)
+        } else {
+            creatures
+        };
+        Self::with_creatures(map_id, creatures, Some(catalog))
+    }
+
+    fn with_creatures(map_id: u32, creatures: Vec<Creature>, catalog: Option<Arc<Catalog>>) -> Self {
         let now = Instant::now();
-        let creatures = creatures_for_map(map_id)
+        let mut grid: HashMap<(i32, i32), HashSet<u64>> = HashMap::new();
+        let creatures = creatures
             .into_iter()
             .map(|creature| {
-                let damage = if creature.hostile { WOLF_DAMAGE } else { 0 };
+                let damage = if creature.melee_damage > 0 {
+                    creature.melee_damage
+                } else if creature.hostile {
+                    4
+                } else {
+                    0
+                };
+                grid.entry(creature.position.cell(CELL_SIZE))
+                    .or_default()
+                    .insert(creature.guid);
                 (
                     creature.guid,
                     CreatureState {
@@ -178,9 +236,12 @@ impl World {
             .collect();
         Self {
             map_id,
+            catalog,
             inner: Arc::new(Mutex::new(Inner {
                 players: HashMap::new(),
                 creatures,
+                grid,
+                loot: HashMap::new(),
             })),
         }
     }
@@ -206,6 +267,9 @@ impl World {
             .map(|presence| presence.player.clone())
             .collect();
         broadcast(&inner, WorldEvent::PlayerAppeared(player.clone()));
+        let nearby = creatures_in_range(&inner, player.position, CREATE_RANGE);
+        let visible: HashSet<u64> = nearby.iter().map(|creature| creature.guid).collect();
+        let last_cell = player.position.cell(CELL_SIZE);
         inner.players.insert(
             player.guid,
             Presence {
@@ -213,9 +277,17 @@ impl World {
                 mailbox,
                 attacking: None,
                 next_swing: Instant::now(),
+                visible,
+                last_cell,
+                looting: None,
             },
         );
         others
+    }
+
+    pub fn creatures_near(&self, position: Position) -> Vec<Creature> {
+        let inner = self.inner.lock().expect("world mutex");
+        creatures_in_range(&inner, position, CREATE_RANGE)
     }
 
     pub fn leave(&self, guid: u64, mailbox: &PlayerMailbox) {
@@ -271,13 +343,16 @@ impl World {
 
     pub fn broadcast_move(&self, from: &PlayerMailbox, movement: Movement) {
         let mut inner = self.inner.lock().expect("world mutex");
-        if let Some(presence) = inner.players.get_mut(&movement.guid) {
-            if !presence.mailbox.same_channel(from) {
-                return;
-            }
-            presence.player.position = movement.position;
+        let Some(presence) = inner.players.get_mut(&movement.guid) else {
+            return;
+        };
+        if !presence.mailbox.same_channel(from) {
+            return;
         }
+        presence.player.position = movement.position;
         let guid = movement.guid;
+        let mailbox = presence.mailbox.clone();
+        refresh_visibility(&mut inner, guid, &mailbox);
         let event = WorldEvent::PlayerMoved(movement);
         for (id, presence) in &inner.players {
             if *id != guid {
@@ -327,21 +402,210 @@ impl World {
         let Some(option) = gossip.option(option_id) else {
             return;
         };
-        match option.action {
+        let action = option.action;
+        let next_menu = match action {
+            GossipAction::ShowMenu { text_id } => gossip.menu(text_id).cloned(),
+            _ => None,
+        };
+        match action {
             GossipAction::Close => from.send(WorldEvent::GossipClosed),
-            GossipAction::ShowMenu { text_id } => {
-                let Some(menu) = gossip.menu(text_id) else {
+            GossipAction::ShowMenu { .. } => {
+                let Some(menu) = next_menu else {
                     return;
                 };
-                from.send(WorldEvent::GossipOpened {
-                    npc,
-                    menu: menu.clone(),
-                });
+                from.send(WorldEvent::GossipOpened { npc, menu });
+            }
+            GossipAction::OpenVendor => {
+                drop(inner);
+                self.list_vendor(from, player, npc);
+            }
+        }
+    }
+
+    pub fn list_vendor(&self, from: &PlayerMailbox, player: u64, npc: u64) {
+        let inner = self.inner.lock().expect("world mutex");
+        let Some(presence) = inner.players.get(&player) else {
+            return;
+        };
+        if !presence.mailbox.same_channel(from) {
+            return;
+        }
+        let Some(creature) = inner.creatures.get(&npc) else {
+            return;
+        };
+        if creature.creature.npc_flags & crate::creature::NPC_FLAG_VENDOR == 0 {
+            return;
+        }
+        if !in_range(
+            presence.player.position,
+            creature.creature.position,
+            GOSSIP_RANGE,
+        ) {
+            return;
+        }
+        let entry = creature.creature.entry;
+        let listings = self
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.vendor_listings(entry))
+            .unwrap_or_default();
+        let items = listings
+            .into_iter()
+            .filter_map(|listing| vendor_offer(self.catalog.as_deref(), listing))
+            .collect();
+        from.send(WorldEvent::GossipClosed);
+        from.send(WorldEvent::VendorOpened { npc, items });
+    }
+
+    pub fn buy_item(&self, from: &PlayerMailbox, player: u64, npc: u64, item_id: u32, amount: u32) {
+        let mut inner = self.inner.lock().expect("world mutex");
+        let Some(presence) = inner.players.get(&player) else {
+            return;
+        };
+        if !presence.mailbox.same_channel(from) {
+            return;
+        }
+        let Some(creature) = inner.creatures.get(&npc) else {
+            return;
+        };
+        if creature.creature.npc_flags & crate::creature::NPC_FLAG_VENDOR == 0 {
+            return;
+        }
+        let entry = creature.creature.entry;
+        let Some(catalog) = self.catalog.as_ref() else {
+            return;
+        };
+        let listings = catalog.vendor_listings(entry);
+        if !listings.iter().any(|listing| listing.item_id == item_id) {
+            return;
+        }
+        let Some(item) = catalog.item(item_id) else {
+            return;
+        };
+        let amount = amount.max(1);
+        let price = item.buy_price.saturating_mul(amount);
+        let stackable = item.stackable;
+        let presence = inner.players.get_mut(&player).expect("player");
+        if presence.player.copper < price {
+            return;
+        }
+        if !presence.player.add_item(item_id, amount, stackable) {
+            return;
+        }
+        presence.player.copper -= price;
+        let copper = presence.player.copper;
+        from.send(WorldEvent::MoneyChanged {
+            guid: player,
+            copper,
+        });
+    }
+
+    pub fn open_loot(&self, from: &PlayerMailbox, player: u64, npc: u64) {
+        let mut inner = self.inner.lock().expect("world mutex");
+        let Some(presence) = inner.players.get(&player) else {
+            return;
+        };
+        if !presence.mailbox.same_channel(from) {
+            return;
+        }
+        let Some(creature) = inner.creatures.get(&npc) else {
+            return;
+        };
+        if !creature.creature.dead
+            || !in_range(
+                presence.player.position,
+                creature.creature.position,
+                GOSSIP_RANGE,
+            )
+        {
+            return;
+        }
+        let loot_id = creature.creature.loot_id;
+        if !inner.loot.contains_key(&npc) {
+            let drops = self
+                .catalog
+                .as_ref()
+                .map(|catalog| catalog.roll_loot(loot_id))
+                .unwrap_or_default();
+            inner.loot.insert(npc, drops);
+        }
+        let items = inner
+            .loot
+            .get(&npc)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, (item_id, _))| *item_id != 0)
+            .map(|(index, (item_id, _))| LootOffer {
+                index: index as u8,
+                item_id: *item_id,
+            })
+            .collect();
+        from.send(WorldEvent::LootOpened {
+            guid: npc,
+            gold: 0,
+            items,
+        });
+        if let Some(presence) = inner.players.get_mut(&player) {
+            presence.looting = Some(npc);
+        }
+    }
+
+    pub fn take_loot(&self, from: &PlayerMailbox, player: u64, index: u8) {
+        let mut inner = self.inner.lock().expect("world mutex");
+        let Some(presence) = inner.players.get(&player) else {
+            return;
+        };
+        if !presence.mailbox.same_channel(from) {
+            return;
+        }
+        let Some(npc) = presence.looting else {
+            return;
+        };
+        let Some(drops) = inner.loot.get(&npc).cloned() else {
+            return;
+        };
+        if index as usize >= drops.len() {
+            return;
+        }
+        let (item_id, count) = drops[index as usize];
+        if item_id == 0 {
+            return;
+        }
+        let stackable = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.item(item_id))
+            .map(|item| item.stackable)
+            .unwrap_or(1);
+        let presence = inner.players.get_mut(&player).expect("player");
+        if !presence.player.add_item(item_id, count, stackable) {
+            return;
+        }
+        if let Some(drops) = inner.loot.get_mut(&npc) {
+            drops[index as usize] = (0, 0);
+        }
+        from.send(WorldEvent::LootTaken { index });
+    }
+
+    pub fn close_loot(&self, from: &PlayerMailbox, player: u64) {
+        let mut inner = self.inner.lock().expect("world mutex");
+        if let Some(presence) = inner.players.get_mut(&player) {
+            if presence.mailbox.same_channel(from) {
+                let guid = presence.looting.take().unwrap_or(0);
+                from.send(WorldEvent::LootClosed { guid });
             }
         }
     }
 
     pub fn npc_text(&self, text_id: u32) -> Option<String> {
+        if let Some(text) = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.gossip_text(text_id))
+        {
+            return Some(text);
+        }
         self.inner
             .lock()
             .expect("world mutex")
@@ -355,6 +619,23 @@ impl World {
                     .and_then(|gossip| gossip.menu(text_id))
                     .map(|menu| menu.text.clone())
             })
+    }
+
+    pub fn item(&self, entry: u32) -> Option<ItemRow> {
+        self.catalog
+            .as_ref()
+            .and_then(|catalog| catalog.item(entry).cloned())
+    }
+
+    pub fn suggest_task(&self, player: u64) -> Option<TaskSpec> {
+        let inner = self.inner.lock().expect("world mutex");
+        let presence = inner.players.get(&player)?;
+        let nearby: Vec<u32> = creatures_in_range(&inner, presence.player.position, CREATE_RANGE)
+            .into_iter()
+            .filter(|creature| creature.hostile)
+            .map(|creature| creature.entry)
+            .collect();
+        QuestDirector::suggest(1, &nearby)
     }
 
     pub fn speak(&self, from: &PlayerMailbox, chat: Chat) {
@@ -499,13 +780,18 @@ impl World {
     pub fn tick(&self, now: Instant) {
         let mut inner = self.inner.lock().expect("world mutex");
         let mut events = Vec::new();
+        let mut moved = Vec::new();
         respawn_creatures(&mut inner, now, &mut events);
         aggro_hostiles(&mut inner, now, &mut events);
+        chase_creatures(&mut inner, &mut events, &mut moved);
         leash_creatures(&mut inner, &mut events);
         swing_players(&mut inner, now, &mut events);
         swing_creatures(&mut inner, now, &mut events);
         for event in events {
-            broadcast(&inner, event);
+            dispatch_event(&mut inner, event);
+        }
+        for guid in moved {
+            sync_creature_viewers(&mut inner, guid);
         }
     }
 }
@@ -524,7 +810,27 @@ const AGGRO_RANGE: f32 = 18.0;
 const LEASH_RANGE: f32 = 50.0;
 const GOSSIP_RANGE: f32 = 10.0;
 const SWING_INTERVAL: Duration = Duration::from_millis(2000);
-const RESPAWN_AFTER: Duration = Duration::from_secs(20);
+const CELL_SIZE: f32 = 40.0;
+const CREATE_RANGE: f32 = 90.0;
+const DESTROY_RANGE: f32 = 100.0;
+const CELL_HYSTERESIS: f32 = 10.0;
+const CREATURE_SPEED: f32 = 7.0;
+const TICK_SECS: f32 = 0.2;
+
+fn vendor_offer(catalog: Option<&Catalog>, listing: VendorListing) -> Option<VendorOffer> {
+    let item = catalog?.item(listing.item_id)?;
+    Some(VendorOffer {
+        item_id: listing.item_id,
+        display_id: item.display_id,
+        max_items: if listing.maxcount <= 0 {
+            u32::MAX
+        } else {
+            listing.maxcount as u32
+        },
+        price: item.buy_price,
+        max_durability: item.max_durability,
+    })
+}
 
 fn creatures_for_map(map_id: u32) -> Vec<Creature> {
     if map_id == MAP_EASTERN_KINGDOMS {
@@ -547,6 +853,216 @@ fn broadcast_in_range(inner: &Inner, origin: Position, range: f32, spoken: Spoke
 fn broadcast(inner: &Inner, event: WorldEvent) {
     for presence in inner.players.values() {
         presence.mailbox.send(event.clone());
+    }
+}
+
+fn dispatch_event(inner: &mut Inner, event: WorldEvent) {
+    match &event {
+        WorldEvent::CreatureAppeared(creature) => {
+            for presence in inner.players.values_mut() {
+                if in_range(presence.player.position, creature.position, CREATE_RANGE) {
+                    presence.visible.insert(creature.guid);
+                    presence.mailbox.send(event.clone());
+                }
+            }
+        }
+        WorldEvent::CreatureLeft { guid } => {
+            for presence in inner.players.values_mut() {
+                if presence.visible.remove(guid) {
+                    presence.mailbox.send(event.clone());
+                }
+            }
+        }
+        WorldEvent::CreatureMoved { guid, .. } => {
+            for presence in inner.players.values() {
+                if presence.visible.contains(guid) {
+                    presence.mailbox.send(event.clone());
+                }
+            }
+        }
+        _ => broadcast(inner, event),
+    }
+}
+
+fn creatures_in_range(inner: &Inner, origin: Position, range: f32) -> Vec<Creature> {
+    let range_sq = range * range;
+    let cell = origin.cell(CELL_SIZE);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for dx in -2..=2 {
+        for dy in -2..=2 {
+            let Some(bucket) = inner.grid.get(&(cell.0 + dx, cell.1 + dy)) else {
+                continue;
+            };
+            for guid in bucket {
+                if !seen.insert(*guid) {
+                    continue;
+                }
+                let Some(state) = inner.creatures.get(guid) else {
+                    continue;
+                };
+                if origin.distance_squared(state.creature.position) <= range_sq {
+                    out.push(state.creature.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn refresh_visibility(inner: &mut Inner, player: u64, mailbox: &PlayerMailbox) {
+    let Some(presence) = inner.players.get(&player) else {
+        return;
+    };
+    let position = presence.player.position;
+    let last_cell = presence.last_cell;
+    let next_cell = sticky_cell(position, last_cell);
+    if next_cell == last_cell {
+        return;
+    }
+    let current = presence.visible.clone();
+    let nearby: HashSet<u64> = creatures_in_range(inner, position, CREATE_RANGE)
+        .into_iter()
+        .map(|creature| creature.guid)
+        .collect();
+    let destroy_sq = DESTROY_RANGE * DESTROY_RANGE;
+    let mut next = HashSet::new();
+    for guid in current.iter().copied() {
+        let Some(state) = inner.creatures.get(&guid) else {
+            mailbox.send(WorldEvent::CreatureLeft { guid });
+            continue;
+        };
+        if position.distance_squared(state.creature.position) <= destroy_sq {
+            next.insert(guid);
+        } else {
+            mailbox.send(WorldEvent::CreatureLeft { guid });
+        }
+    }
+    for guid in nearby {
+        if next.insert(guid)
+            && let Some(state) = inner.creatures.get(&guid)
+        {
+            mailbox.send(WorldEvent::CreatureAppeared(state.creature.clone()));
+        }
+    }
+    if let Some(presence) = inner.players.get_mut(&player) {
+        presence.visible = next;
+        presence.last_cell = next_cell;
+    }
+}
+
+fn sticky_cell(position: Position, last: (i32, i32)) -> (i32, i32) {
+    let fresh = position.cell(CELL_SIZE);
+    if fresh == last {
+        return last;
+    }
+    let cx = (last.0 as f32 + 0.5) * CELL_SIZE;
+    let cy = (last.1 as f32 + 0.5) * CELL_SIZE;
+    let limit = CELL_SIZE / 2.0 + CELL_HYSTERESIS;
+    if (position.x - cx).abs() <= limit && (position.y - cy).abs() <= limit {
+        last
+    } else {
+        fresh
+    }
+}
+
+fn move_grid(
+    grid: &mut HashMap<(i32, i32), HashSet<u64>>,
+    guid: u64,
+    from: (i32, i32),
+    to: (i32, i32),
+) {
+    if from == to {
+        return;
+    }
+    if let Some(bucket) = grid.get_mut(&from) {
+        bucket.remove(&guid);
+        if bucket.is_empty() {
+            grid.remove(&from);
+        }
+    }
+    grid.entry(to).or_default().insert(guid);
+}
+
+fn chase_creatures(inner: &mut Inner, events: &mut Vec<WorldEvent>, moved: &mut Vec<u64>) {
+    let mut moves = Vec::new();
+    let targets: Vec<(u64, u64, Position, Position)> = inner
+        .creatures
+        .values()
+        .filter(|state| !state.creature.dead)
+        .filter_map(|state| {
+            let target = state.combat_target?;
+            let player = inner.players.get(&target)?;
+            if in_range(
+                state.creature.position,
+                player.player.position,
+                MELEE_RANGE,
+            ) {
+                return None;
+            }
+            Some((
+                state.creature.guid,
+                target,
+                state.creature.position,
+                player.player.position,
+            ))
+        })
+        .collect();
+    for (guid, _, from, dest) in targets {
+        let dx = dest.x - from.x;
+        let dy = dest.y - from.y;
+        let dist = (dx * dx + dy * dy).sqrt().max(0.001);
+        let step = CREATURE_SPEED * TICK_SECS;
+        let ratio = (step / dist).min(1.0);
+        let to = Position {
+            x: from.x + dx * ratio,
+            y: from.y + dy * ratio,
+            z: dest.z,
+            orientation: dy.atan2(dx),
+        };
+        let (old_cell, new_cell) = if let Some(state) = inner.creatures.get_mut(&guid) {
+            let old_cell = state.creature.position.cell(CELL_SIZE);
+            state.creature.position = to;
+            (old_cell, to.cell(CELL_SIZE))
+        } else {
+            continue;
+        };
+        move_grid(&mut inner.grid, guid, old_cell, new_cell);
+        let duration_ms = ((dist / CREATURE_SPEED) * 1000.0).clamp(50.0, 1000.0) as u32;
+        moved.push(guid);
+        moves.push(WorldEvent::CreatureMoved {
+            guid,
+            from,
+            to,
+            duration_ms,
+        });
+    }
+    events.extend(moves);
+}
+
+fn sync_creature_viewers(inner: &mut Inner, guid: u64) {
+    let Some(creature) = inner
+        .creatures
+        .get(&guid)
+        .map(|state| state.creature.clone())
+    else {
+        return;
+    };
+    let position = creature.position;
+    let create_sq = CREATE_RANGE * CREATE_RANGE;
+    let destroy_sq = DESTROY_RANGE * DESTROY_RANGE;
+    for presence in inner.players.values_mut() {
+        let dist = presence.player.position.distance_squared(position);
+        let seen = presence.visible.contains(&guid);
+        if seen && dist > destroy_sq {
+            presence.visible.remove(&guid);
+            presence.mailbox.send(WorldEvent::CreatureLeft { guid });
+        } else if !seen && dist <= create_sq {
+            presence.visible.insert(guid);
+            presence
+                .mailbox
+                .send(WorldEvent::CreatureAppeared(creature.clone()));
+        }
     }
 }
 
@@ -584,22 +1100,27 @@ fn respawn_creatures(inner: &mut Inner, now: Instant, events: &mut Vec<WorldEven
         let Some(died_at) = state.died_at else {
             continue;
         };
-        if now.duration_since(died_at) >= RESPAWN_AFTER {
+        if now.duration_since(died_at) >= Duration::from_secs(state.creature.respawn_secs as u64) {
             respawn.push(state.creature.guid);
         }
     }
     for guid in respawn {
-        let Some(state) = inner.creatures.get_mut(&guid) else {
+        let Some((old_cell, home, appeared)) = inner.creatures.get_mut(&guid).map(|state| {
+            let old_cell = state.creature.position.cell(CELL_SIZE);
+            state.creature.health = state.creature.max_health;
+            state.creature.dead = false;
+            state.creature.position = state.home;
+            state.combat_target = None;
+            state.died_at = None;
+            state.next_swing = now;
+            (old_cell, state.home, state.creature.clone())
+        }) else {
             continue;
         };
-        state.creature.health = state.creature.max_health;
-        state.creature.dead = false;
-        state.creature.position = state.home;
-        state.combat_target = None;
-        state.died_at = None;
-        state.next_swing = now;
+        inner.loot.remove(&guid);
+        move_grid(&mut inner.grid, guid, old_cell, home.cell(CELL_SIZE));
         events.push(WorldEvent::CreatureLeft { guid });
-        events.push(WorldEvent::CreatureAppeared(state.creature.clone()));
+        events.push(WorldEvent::CreatureAppeared(appeared));
     }
 }
 

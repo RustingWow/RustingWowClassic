@@ -1,16 +1,20 @@
-use wow_shared::{CharacterClass, CharacterGender, CharacterRace};
+use wow_shared::{CharacterClass, CharacterGender, CharacterRace, CreatureFaction};
 use wow_world_messages::vanilla::{Class, Gender, Power, Race, RaceClass};
 
 pub const HUMAN_MALE_DISPLAY_ID: i32 = 49;
 
-const FACTION_HUMAN: i32 = 1;
-const FACTION_ORC: i32 = 2;
-const FACTION_DWARF: i32 = 3;
-const FACTION_NIGHT_ELF: i32 = 4;
-const FACTION_UNDEAD: i32 = 5;
-const FACTION_TAUREN: i32 = 6;
-const FACTION_GNOME: i32 = 115;
-const FACTION_TROLL: i32 = 116;
+pub fn faction(race: CharacterRace) -> CreatureFaction {
+    match race {
+        CharacterRace::Human => CreatureFaction::PlayerHuman,
+        CharacterRace::Orc => CreatureFaction::PlayerOrc,
+        CharacterRace::Dwarf => CreatureFaction::PlayerDwarf,
+        CharacterRace::NightElf => CreatureFaction::PlayerNightElf,
+        CharacterRace::Undead => CreatureFaction::PlayerUndead,
+        CharacterRace::Tauren => CreatureFaction::PlayerTauren,
+        CharacterRace::Gnome => CreatureFaction::PlayerGnome,
+        CharacterRace::Troll => CreatureFaction::PlayerTroll,
+    }
+}
 
 pub fn race_allowed(race: CharacterRace, class: CharacterClass) -> bool {
     RaceClass::try_from((self::race(race), self::class(class))).is_ok()
@@ -75,19 +79,6 @@ pub fn display_id(race: CharacterRace, gender: CharacterGender) -> i32 {
                 1478
             }
         }
-    }
-}
-
-pub fn faction(race: CharacterRace) -> i32 {
-    match race {
-        CharacterRace::Human => FACTION_HUMAN,
-        CharacterRace::Orc => FACTION_ORC,
-        CharacterRace::Dwarf => FACTION_DWARF,
-        CharacterRace::NightElf => FACTION_NIGHT_ELF,
-        CharacterRace::Undead => FACTION_UNDEAD,
-        CharacterRace::Tauren => FACTION_TAUREN,
-        CharacterRace::Gnome => FACTION_GNOME,
-        CharacterRace::Troll => FACTION_TROLL,
     }
 }
 

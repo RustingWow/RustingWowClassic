@@ -310,6 +310,44 @@ async fn handle_action(
             let text = npc_text(presence, text_id).await?;
             connection.reply_npc_text(text_id, text.as_deref()).await?;
         }
+        ClientAction::ListVendor { guid } if in_world => {
+            if let Some(character) = character.as_ref() {
+                dispatch_list_vendor(presence, mailbox, character.guid, guid).await?;
+            }
+        }
+        ClientAction::ListVendor { .. } => {}
+        ClientAction::BuyItem {
+            vendor,
+            item,
+            amount,
+        } if in_world => {
+            if let Some(character) = character.as_ref() {
+                dispatch_buy_item(presence, mailbox, character.guid, vendor, item, amount).await?;
+            }
+        }
+        ClientAction::BuyItem { .. } => {}
+        ClientAction::QueryItem { entry } => {
+            let item = lookup_item(presence, entry).await?;
+            connection.reply_item(entry, item.as_ref()).await?;
+        }
+        ClientAction::Loot { guid } if in_world => {
+            if let Some(character) = character.as_ref() {
+                dispatch_loot(presence, mailbox, character.guid, guid).await?;
+            }
+        }
+        ClientAction::Loot { .. } => {}
+        ClientAction::LootItem { index } if in_world => {
+            if let Some(character) = character.as_ref() {
+                dispatch_take_loot(presence, mailbox, character.guid, index).await?;
+            }
+        }
+        ClientAction::LootItem { .. } => {}
+        ClientAction::LootRelease if in_world => {
+            if let Some(character) = character.as_ref() {
+                dispatch_close_loot(presence, mailbox, character.guid).await?;
+            }
+        }
+        ClientAction::LootRelease => {}
         ClientAction::Moved(pending) if in_world => {
             if let Some(character) = character.as_mut() {
                 if let Some(movement) = pending.bind(character.guid) {
@@ -678,4 +716,98 @@ async fn dispatch_gossip_select(
         MapBackend::Remote(session) => session.select_gossip_option(player, npc, option).await?,
     }
     Ok(())
+}
+
+async fn dispatch_list_vendor(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    player: u64,
+    npc: u64,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::list_vendor(world, mailbox, player, npc),
+        MapBackend::Remote(session) => session.list_vendor(player, npc).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_buy_item(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    player: u64,
+    npc: u64,
+    item: u32,
+    amount: u32,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::buy_item(world, mailbox, player, npc, item, amount),
+        MapBackend::Remote(session) => session.buy_item(player, npc, item, amount).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_loot(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    player: u64,
+    npc: u64,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::open_loot(world, mailbox, player, npc),
+        MapBackend::Remote(session) => session.open_loot(player, npc).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_take_loot(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    player: u64,
+    index: u8,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::take_loot(world, mailbox, player, 0, index),
+        MapBackend::Remote(session) => session.take_loot(player, index).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_close_loot(
+    presence: &Option<WorldPresence>,
+    mailbox: &PlayerMailbox,
+    player: u64,
+) -> anyhow::Result<()> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(());
+    };
+    match backend {
+        MapBackend::Local(world) => MapHandle::close_loot(world, mailbox, player),
+        MapBackend::Remote(session) => session.close_loot(player).await?,
+    }
+    Ok(())
+}
+
+async fn lookup_item(
+    presence: &Option<WorldPresence>,
+    entry: u32,
+) -> anyhow::Result<Option<crate::catalog::ItemRow>> {
+    let Some(backend) = presence.as_ref().and_then(WorldPresence::backend) else {
+        return Ok(None);
+    };
+    match backend {
+        MapBackend::Local(world) => Ok(MapHandle::item(world, entry)),
+        MapBackend::Remote(session) => session.item(entry).await,
+    }
 }

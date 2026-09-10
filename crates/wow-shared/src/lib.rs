@@ -1,7 +1,7 @@
 mod character;
-mod character_enums;
 mod config;
 mod credentials;
+mod enums;
 mod map;
 mod session;
 mod shards;
@@ -11,8 +11,9 @@ pub use character::{
     Appearance, CharacterTemplate, NORTHSHIRE_ORIENTATION, NORTHSHIRE_X, NORTHSHIRE_Y,
     NORTHSHIRE_Z, Position,
 };
-pub use character_enums::{
-    CharacterArea, CharacterClass, CharacterGender, CharacterMap, CharacterRace, DbEnum,
+pub use enums::{
+    CharacterArea, CharacterClass, CharacterGender, CharacterMap, CharacterRace, CreatureFaction,
+    DbEnum, GossipOptionKind,
 };
 pub use config::{AuthConfig, WorldConfig, WorldRole};
 pub use credentials::{Account, CredentialError, normalize_username};

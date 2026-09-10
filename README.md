@@ -10,6 +10,15 @@ Il portale e l’auth-server condividono Postgres: registrazione e login web fun
 
 Le tabelle si creano da sole al primo avvio (sqlx, equivalente Flyway). Redis resta opzionale per le sessioni live, non per gli account.
 
+Il world-server crea lo schema `world` vuoto (creature, item, vendor, loot, gossip). I dati CMaNGOS classic-db stanno in `db/*.sql.gz` e **non** partono con `migrate!`: dopo il primo avvio del world-server, carica il catalogo a mano:
+
+```bash
+export DATABASE_URL=postgres://wow:wow@127.0.0.1:5432/wow
+./db/load.sh
+```
+
+Poi riavvia il world-server. Senza quel load restano solo i due NPC demo di Northshire. Dettagli e re-convert: [`db/README.md`](db/README.md).
+
 ## Prerequisiti
 
 - [rustup](https://rustup.rs) — `rust-toolchain.toml` installa Rust **1.98.1**

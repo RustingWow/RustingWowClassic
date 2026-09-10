@@ -1,4 +1,4 @@
-use wow_shared::Position;
+use wow_shared::{CreatureFaction, Position};
 use wow_world_messages::vanilla::CreatureFamily;
 
 const UNIT_HIGH: u64 = 0xF130;
@@ -7,9 +7,10 @@ pub const ENTRY_NORTHSHIRE_GUARD: u32 = 1423;
 pub const ENTRY_YOUNG_WOLF: u32 = 299;
 pub const DISPLAY_NORTHSHIRE_GUARD: i32 = 3167;
 pub const DISPLAY_YOUNG_WOLF: i32 = 447;
-pub const FACTION_STORMWIND: i32 = 11;
-pub const FACTION_MONSTER: i32 = 14;
+pub const FACTION_STORMWIND: i32 = CreatureFaction::Stormwind.as_protocol() as i32;
+pub const FACTION_MONSTER: i32 = CreatureFaction::Monster.as_protocol() as i32;
 pub const NPC_FLAG_GOSSIP: i32 = 1;
+pub const NPC_FLAG_VENDOR: i32 = 4;
 pub const GUARD_GOSSIP_TEXT_ID: u32 = 900_001;
 pub const GUARD_GOSSIP_TEXT: &str =
     "Welcome to Northshire, recruit. Keep your weapon close—wolves still hunt these woods.";
@@ -43,6 +44,9 @@ pub struct Creature {
     pub hostile: bool,
     pub dead: bool,
     pub gossip: Option<Gossip>,
+    pub loot_id: i32,
+    pub respawn_secs: u32,
+    pub melee_damage: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -68,6 +72,7 @@ pub struct GossipOption {
 pub enum GossipAction {
     Close,
     ShowMenu { text_id: u32 },
+    OpenVendor,
 }
 
 impl Gossip {
@@ -136,6 +141,9 @@ pub fn northshire_guard() -> Creature {
         hostile: false,
         dead: false,
         gossip: Some(northshire_guard_gossip()),
+        loot_id: 0,
+        respawn_secs: 20,
+        melee_damage: 0,
     }
 }
 
@@ -190,6 +198,9 @@ pub fn northshire_wolf() -> Creature {
         hostile: true,
         dead: false,
         gossip: None,
+        loot_id: 0,
+        respawn_secs: 20,
+        melee_damage: WOLF_DAMAGE,
     }
 }
 

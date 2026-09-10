@@ -1,5 +1,6 @@
 use wow_shared::{
-    Appearance, CharacterClass, CharacterGender, CharacterRace, CharacterTemplate, Position,
+    Appearance, CharacterClass, CharacterGender, CharacterRace, CharacterTemplate, CreatureFaction,
+    Position,
 };
 
 use crate::appearance::{HUMAN_MALE_DISPLAY_ID, display_id, faction};
@@ -8,8 +9,6 @@ pub const PLAYER_MAX_HEALTH: i32 = 100;
 pub const PLAYER_DAMAGE: i32 = 12;
 pub const STAND_STATE_STAND: u8 = 0;
 pub const STAND_STATE_DEAD: u8 = 7;
-
-const FACTION_HUMAN: i32 = 1;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Player {
@@ -25,6 +24,10 @@ pub struct Player {
     pub appearance: Appearance,
     pub display_id: i32,
     pub faction: i32,
+    #[serde(default)]
+    pub copper: u32,
+    #[serde(default)]
+    pub bag: [Option<(u32, u32)>; 16],
 }
 
 impl Player {
@@ -41,12 +44,52 @@ impl Player {
             gender: CharacterGender::Male,
             appearance: Appearance::default(),
             display_id: HUMAN_MALE_DISPLAY_ID,
-            faction: FACTION_HUMAN,
+            faction: CreatureFaction::PlayerHuman.as_protocol() as i32,
+            copper: 10_000,
+            bag: [None; 16],
         }
     }
 
     pub fn is_alive(&self) -> bool {
         self.health > 0
+    }
+
+    pub fn add_item(&mut self, item_id: u32, count: u32, stackable: u32) -> bool {
+        let stackable = stackable.max(1);
+        let mut remaining = count;
+        for slot in &mut self.bag {
+            if remaining == 0 {
+                break;
+            }
+            if let Some((existing, stacked)) = slot {
+                if *existing == item_id && *stacked < stackable {
+                    let room = stackable - *stacked;
+                    let add = remaining.min(room);
+                    *stacked += add;
+                    remaining -= add;
+                }
+            }
+        }
+        for slot in &mut self.bag {
+            if remaining == 0 {
+                break;
+            }
+            if slot.is_none() {
+                let add = remaining.min(stackable);
+                *slot = Some((item_id, add));
+                remaining -= add;
+            }
+        }
+        remaining == 0
+    }
+
+    pub fn item_count(&self, item_id: u32) -> u32 {
+        self.bag
+            .iter()
+            .filter_map(|slot| *slot)
+            .filter(|(id, _)| *id == item_id)
+            .map(|(_, count)| count)
+            .sum()
     }
 }
 
@@ -58,7 +101,7 @@ impl From<&CharacterTemplate> for Player {
         player.gender = character.gender;
         player.appearance = character.appearance;
         player.display_id = display_id(character.race, character.gender);
-        player.faction = faction(character.race);
+        player.faction = faction(character.race).as_protocol() as i32;
         player
     }
 }

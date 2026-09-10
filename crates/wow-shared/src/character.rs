@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::character_enums::{
+use crate::enums::{
     CharacterArea, CharacterClass, CharacterGender, CharacterMap, CharacterRace,
 };
 
@@ -30,6 +30,10 @@ impl Position {
         let dy = self.y - other.y;
         let dz = self.z - other.z;
         dx * dx + dy * dy + dz * dz
+    }
+
+    pub fn cell(self, size: f32) -> (i32, i32) {
+        ((self.x / size).floor() as i32, (self.y / size).floor() as i32)
     }
 }
 

@@ -3,27 +3,32 @@ use wow_shared::{CharacterMap, CharacterTemplate};
 use wow_srp::vanilla_header::EncrypterHalf;
 use wow_world_messages::Guid;
 use wow_world_messages::vanilla::{
-    Character, Class, CreatureFamily, DamageInfo, DateTime, Gender, GossipItem, HitInfo, Language,
-    Level, LogoutResult, LogoutSpeed, MovementBlock, MovementBlock_MovementFlags,
-    MovementBlock_UpdateFlag, MovementBlock_UpdateFlag_All, MovementBlock_UpdateFlag_Living,
-    NpcTextUpdate, NpcTextUpdateEmote, Object, ObjectType, PlayerChatTag, Power, Race,
-    SMSG_ACCOUNT_DATA_TIMES, SMSG_ACTION_BUTTONS, SMSG_ATTACKERSTATEUPDATE, SMSG_ATTACKSTART,
-    SMSG_ATTACKSTOP, SMSG_BINDPOINTUPDATE, SMSG_CHAR_CREATE, SMSG_CHAR_DELETE, SMSG_CHAR_ENUM,
+    AllowedClass, AllowedRace, Character, Class, CreatureFamily, DamageInfo, DateTime, Gender,
+    Gold, GossipItem, HitInfo, InventoryType, ItemClassAndSubClass, ItemFlag, ItemQuality, Language,
+    Level, ListInventoryItem, LogoutResult, LogoutSpeed, LootItem, LootSlotType,
+    MovementBlock, MovementBlock_MovementFlags, MovementBlock_UpdateFlag,
+    MovementBlock_UpdateFlag_All, MovementBlock_UpdateFlag_Living, NpcTextUpdate,
+    NpcTextUpdateEmote, Object, ObjectType, PlayerChatTag, Power, Race, SMSG_ACCOUNT_DATA_TIMES,
+    SMSG_ACTION_BUTTONS, SMSG_ATTACKERSTATEUPDATE, SMSG_ATTACKSTART, SMSG_ATTACKSTOP,
+    SMSG_BINDPOINTUPDATE, SMSG_CHAR_CREATE, SMSG_CHAR_DELETE, SMSG_CHAR_ENUM,
     SMSG_CHAT_PLAYER_NOT_FOUND, SMSG_CREATURE_QUERY_RESPONSE, SMSG_CREATURE_QUERY_RESPONSE_found,
     SMSG_DESTROY_OBJECT, SMSG_GOSSIP_COMPLETE, SMSG_GOSSIP_MESSAGE, SMSG_INITIAL_SPELLS,
-    SMSG_INITIALIZE_FACTIONS, SMSG_LOGIN_SETTIMESPEED, SMSG_LOGIN_VERIFY_WORLD,
-    SMSG_LOGOUT_CANCEL_ACK, SMSG_LOGOUT_COMPLETE, SMSG_LOGOUT_RESPONSE, SMSG_MESSAGECHAT,
-    SMSG_MESSAGECHAT_ChatType, SMSG_NAME_QUERY_RESPONSE, SMSG_NEW_WORLD, SMSG_NPC_TEXT_UPDATE,
-    SMSG_PONG, SMSG_STANDSTATE_UPDATE, SMSG_TRANSFER_PENDING, SMSG_TUTORIAL_FLAGS,
-    SMSG_UPDATE_OBJECT, ServerMessage, UnitStandState, UpdateMask, UpdatePlayer, UpdateUnit,
-    WorldResult,
+    SMSG_INITIALIZE_FACTIONS, SMSG_ITEM_QUERY_SINGLE_RESPONSE, SMSG_ITEM_QUERY_SINGLE_RESPONSE_found,
+    SMSG_LIST_INVENTORY, SMSG_LOGIN_SETTIMESPEED, SMSG_LOGIN_VERIFY_WORLD, SMSG_LOGOUT_CANCEL_ACK,
+    SMSG_LOGOUT_COMPLETE, SMSG_LOGOUT_RESPONSE, SMSG_LOOT_RELEASE_RESPONSE, SMSG_LOOT_REMOVED,
+    SMSG_LOOT_RESPONSE, SMSG_LOOT_RESPONSE_LootMethod, SMSG_MESSAGECHAT, SMSG_MESSAGECHAT_ChatType,
+    SMSG_MONSTER_MOVE, SMSG_MONSTER_MOVE_MonsterMoveType, SMSG_NAME_QUERY_RESPONSE, SMSG_NEW_WORLD,
+    SMSG_NPC_TEXT_UPDATE, SMSG_PONG, SMSG_STANDSTATE_UPDATE, SMSG_TRANSFER_PENDING,
+    SMSG_TUTORIAL_FLAGS, SMSG_UPDATE_OBJECT, ServerMessage, SplineFlag, UnitStandState, UpdateMask,
+    UpdatePlayer, UpdateUnit, WorldResult,
 };
 
 use crate::appearance::{class, gender, power, race};
+use crate::catalog::ItemRow;
 use crate::creature::{Creature, GossipMenu, is_creature_guid};
 use crate::player::Player;
 use crate::protocol::geometry::vector3d;
-use crate::world::{Attack, ChatDelivery, MeleeHit, SpokenChat};
+use crate::world::{Attack, ChatDelivery, LootOffer, MeleeHit, SpokenChat, VendorOffer};
 
 const UNIT_FLAG_NON_ATTACKABLE: i32 = 0x0000_0002;
 const UNIT_FLAG_IMMUNE_TO_PC: i32 = 0x0000_0100;
@@ -424,6 +429,197 @@ where
     Ok(())
 }
 
+pub async fn vendor_list<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    npc: u64,
+    items: Vec<VendorOffer>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_LIST_INVENTORY {
+        vendor: Guid::new(npc),
+        items: items
+            .into_iter()
+            .map(|offer| ListInventoryItem {
+                item_stack_count: 1,
+                item: offer.item_id,
+                item_display_id: offer.display_id,
+                max_items: offer.max_items,
+                price: Gold::new(offer.price),
+                max_durability: offer.max_durability,
+                durability: offer.max_durability,
+            })
+            .collect(),
+    }
+    .tokio_write_encrypted_server(stream, encrypter)
+    .await?;
+    Ok(())
+}
+
+pub async fn loot_opened<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    guid: u64,
+    gold: u32,
+    items: Vec<LootOffer>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_LOOT_RESPONSE {
+        guid: Guid::new(guid),
+        loot_method: SMSG_LOOT_RESPONSE_LootMethod::Corpse,
+        gold: Gold::new(gold),
+        items: items
+            .into_iter()
+            .map(|offer| LootItem {
+                index: offer.index,
+                item: offer.item_id,
+                ty: LootSlotType::TypeAllowLoot,
+            })
+            .collect(),
+    }
+    .tokio_write_encrypted_server(stream, encrypter)
+    .await?;
+    Ok(())
+}
+
+pub async fn loot_taken<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    index: u8,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_LOOT_REMOVED { slot: index }
+        .tokio_write_encrypted_server(stream, encrypter)
+        .await?;
+    Ok(())
+}
+
+pub async fn loot_closed<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    guid: u64,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_LOOT_RELEASE_RESPONSE {
+        guid: Guid::new(guid),
+        unknown1: 1,
+    }
+    .tokio_write_encrypted_server(stream, encrypter)
+    .await?;
+    Ok(())
+}
+
+pub async fn creature_moved<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    guid: u64,
+    from: wow_shared::Position,
+    to: wow_shared::Position,
+    duration_ms: u32,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    SMSG_MONSTER_MOVE {
+        guid: Guid::new(guid),
+        spline_point: vector3d(from),
+        spline_id: 0,
+        move_type: SMSG_MONSTER_MOVE_MonsterMoveType::Normal,
+        spline_flags: SplineFlag::empty(),
+        duration: duration_ms,
+        splines: vec![vector3d(to)],
+    }
+    .tokio_write_encrypted_server(stream, encrypter)
+    .await?;
+    Ok(())
+}
+
+pub async fn money<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    guid: u64,
+    copper: u32,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    let packed = Guid::new(guid);
+    SMSG_UPDATE_OBJECT {
+        has_transport: 0,
+        objects: vec![Object::Values {
+            guid1: packed,
+            mask1: UpdateMask::Player(
+                UpdatePlayer::builder()
+                    .set_object_guid(packed)
+                    .set_player_field_coinage(copper as i32)
+                    .finalize(),
+            ),
+        }],
+    }
+    .tokio_write_encrypted_server(stream, encrypter)
+    .await?;
+    Ok(())
+}
+
+pub async fn item_query<W>(
+    stream: &mut W,
+    encrypter: &mut EncrypterHalf,
+    entry: u32,
+    item: Option<&ItemRow>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    let packet = match item {
+        Some(item) => {
+            let class_and_sub_class = ItemClassAndSubClass::try_from(
+                (u64::from(item.subclass) << 32) | u64::from(item.class),
+            )
+            .unwrap_or(ItemClassAndSubClass::Consumable);
+            SMSG_ITEM_QUERY_SINGLE_RESPONSE {
+                item: entry,
+                found: Some(SMSG_ITEM_QUERY_SINGLE_RESPONSE_found {
+                    class_and_sub_class,
+                    name1: item.name.clone(),
+                    display_id: item.display_id,
+                    quality: ItemQuality::try_from(item.quality).unwrap_or(ItemQuality::Normal),
+                    flags: ItemFlag::new(item.flags),
+                    buy_price: Gold::new(item.buy_price),
+                    sell_price: Gold::new(item.sell_price),
+                    inventory_type: InventoryType::try_from(item.inventory_type)
+                        .unwrap_or(InventoryType::NonEquip),
+                    allowed_class: AllowedClass::all(),
+                    allowed_race: AllowedRace::all(),
+                    item_level: Level::new(item.item_level),
+                    required_level: Level::new(item.required_level),
+                    stackable: item.stackable,
+                    max_durability: item.max_durability,
+                    description: item.description.clone(),
+                    delay: item.delay,
+                    armor: item.armor,
+                    ..Default::default()
+                }),
+            }
+        }
+        None => SMSG_ITEM_QUERY_SINGLE_RESPONSE {
+            item: entry,
+            found: None,
+        },
+    };
+    packet
+        .tokio_write_encrypted_server(stream, encrypter)
+        .await?;
+    Ok(())
+}
+
 pub async fn npc_text_update<W>(
     stream: &mut W,
     encrypter: &mut EncrypterHalf,
@@ -701,7 +897,8 @@ fn create_player_object(player: &Player, as_self: bool) -> Object {
             player.appearance.hair_color,
         )
         .set_player_bytes_2(player.appearance.facial_hair, 0, 0, 0)
-        .set_unit_bytes_1(player.stand_state, 0, 0, 0);
+        .set_unit_bytes_1(player.stand_state, 0, 0, 0)
+        .set_player_field_coinage(player.copper as i32);
     if player.health <= 0 {
         update = update
             .set_unit_dynamic_flags(UNIT_DYNFLAG_DEAD)

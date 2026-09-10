@@ -11,10 +11,12 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use wow_shared::Position;
 use wow_world_messages::vanilla::CreatureFamily;
 
+use crate::catalog::ItemRow;
 use crate::creature::{Creature, Gossip, GossipMenu};
 use crate::player::Player;
 use crate::world::{
-    Attack, Chat, MeleeHit, Movement, PlayerMailbox, SpokenChat, World, WorldEvent,
+    Attack, Chat, LootOffer, MeleeHit, Movement, PlayerMailbox, SpokenChat, VendorOffer, World,
+    WorldEvent,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,6 +65,33 @@ enum FrameBody {
         npc: u64,
         option: u32,
     },
+    ListVendor {
+        player: u64,
+        npc: u64,
+    },
+    BuyItem {
+        player: u64,
+        npc: u64,
+        item: u32,
+        amount: u32,
+    },
+    OpenLoot {
+        player: u64,
+        npc: u64,
+    },
+    TakeLoot {
+        player: u64,
+        index: u8,
+    },
+    CloseLoot {
+        player: u64,
+    },
+    QueryItem {
+        entry: u32,
+    },
+    Item {
+        item: Option<ItemRow>,
+    },
     QueryPlayer {
         guid: u64,
     },
@@ -105,6 +134,17 @@ enum WireEvent {
     PlayerStandState { guid: u64, state: u8 },
     GossipOpened { npc: u64, menu: GossipMenu },
     GossipClosed,
+    VendorOpened { npc: u64, items: Vec<VendorOffer> },
+    LootOpened { guid: u64, gold: u32, items: Vec<LootOffer> },
+    LootTaken { index: u8 },
+    LootClosed { guid: u64 },
+    MoneyChanged { guid: u64, copper: u32 },
+    CreatureMoved {
+        guid: u64,
+        from: Position,
+        to: Position,
+        duration_ms: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +166,9 @@ struct WireCreature {
     hostile: bool,
     dead: bool,
     gossip: Option<Gossip>,
+    loot_id: i32,
+    respawn_secs: u32,
+    melee_damage: i32,
 }
 
 impl From<&Creature> for WireCreature {
@@ -148,6 +191,9 @@ impl From<&Creature> for WireCreature {
             hostile: creature.hostile,
             dead: creature.dead,
             gossip: creature.gossip.clone(),
+            loot_id: creature.loot_id,
+            respawn_secs: creature.respawn_secs,
+            melee_damage: creature.melee_damage,
         }
     }
 }
@@ -172,6 +218,9 @@ impl From<WireCreature> for Creature {
             hostile: wire.hostile,
             dead: wire.dead,
             gossip: wire.gossip,
+            loot_id: wire.loot_id,
+            respawn_secs: wire.respawn_secs,
+            melee_damage: wire.melee_damage,
         }
     }
 }
@@ -211,6 +260,22 @@ fn event_to_wire(event: WorldEvent) -> WireEvent {
         WorldEvent::PlayerStandState { guid, state } => WireEvent::PlayerStandState { guid, state },
         WorldEvent::GossipOpened { npc, menu } => WireEvent::GossipOpened { npc, menu },
         WorldEvent::GossipClosed => WireEvent::GossipClosed,
+        WorldEvent::VendorOpened { npc, items } => WireEvent::VendorOpened { npc, items },
+        WorldEvent::LootOpened { guid, gold, items } => WireEvent::LootOpened { guid, gold, items },
+        WorldEvent::LootTaken { index } => WireEvent::LootTaken { index },
+        WorldEvent::LootClosed { guid } => WireEvent::LootClosed { guid },
+        WorldEvent::MoneyChanged { guid, copper } => WireEvent::MoneyChanged { guid, copper },
+        WorldEvent::CreatureMoved {
+            guid,
+            from,
+            to,
+            duration_ms,
+        } => WireEvent::CreatureMoved {
+            guid,
+            from,
+            to,
+            duration_ms,
+        },
     }
 }
 
@@ -232,6 +297,22 @@ fn event_from_wire(event: WireEvent) -> WorldEvent {
         WireEvent::PlayerStandState { guid, state } => WorldEvent::PlayerStandState { guid, state },
         WireEvent::GossipOpened { npc, menu } => WorldEvent::GossipOpened { npc, menu },
         WireEvent::GossipClosed => WorldEvent::GossipClosed,
+        WireEvent::VendorOpened { npc, items } => WorldEvent::VendorOpened { npc, items },
+        WireEvent::LootOpened { guid, gold, items } => WorldEvent::LootOpened { guid, gold, items },
+        WireEvent::LootTaken { index } => WorldEvent::LootTaken { index },
+        WireEvent::LootClosed { guid } => WorldEvent::LootClosed { guid },
+        WireEvent::MoneyChanged { guid, copper } => WorldEvent::MoneyChanged { guid, copper },
+        WireEvent::CreatureMoved {
+            guid,
+            from,
+            to,
+            duration_ms,
+        } => WorldEvent::CreatureMoved {
+            guid,
+            from,
+            to,
+            duration_ms,
+        },
     }
 }
 
@@ -387,6 +468,50 @@ impl MapSession {
         Ok(())
     }
 
+    pub async fn list_vendor(&self, player: u64, npc: u64) -> anyhow::Result<()> {
+        self.request(FrameBody::ListVendor { player, npc }).await?;
+        Ok(())
+    }
+
+    pub async fn buy_item(
+        &self,
+        player: u64,
+        npc: u64,
+        item: u32,
+        amount: u32,
+    ) -> anyhow::Result<()> {
+        self.request(FrameBody::BuyItem {
+            player,
+            npc,
+            item,
+            amount,
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn open_loot(&self, player: u64, npc: u64) -> anyhow::Result<()> {
+        self.request(FrameBody::OpenLoot { player, npc }).await?;
+        Ok(())
+    }
+
+    pub async fn take_loot(&self, player: u64, index: u8) -> anyhow::Result<()> {
+        self.request(FrameBody::TakeLoot { player, index }).await?;
+        Ok(())
+    }
+
+    pub async fn close_loot(&self, player: u64) -> anyhow::Result<()> {
+        self.request(FrameBody::CloseLoot { player }).await?;
+        Ok(())
+    }
+
+    pub async fn item(&self, entry: u32) -> anyhow::Result<Option<ItemRow>> {
+        match self.request(FrameBody::QueryItem { entry }).await? {
+            FrameBody::Item { item } => Ok(item),
+            other => anyhow::bail!("unexpected item response: {other:?}"),
+        }
+    }
+
     pub async fn player(&self, guid: u64) -> anyhow::Result<Option<Player>> {
         match self.request(FrameBody::QueryPlayer { guid }).await? {
             FrameBody::Player { player } => Ok(player),
@@ -504,10 +629,14 @@ fn handle_request(
                 }
             }
             *joined = Some((map_id, player.guid));
-            let others = world.join(player, mailbox.clone());
+            let others = world.join(player.clone(), mailbox.clone());
             FrameBody::JoinOk {
                 others,
-                creatures: world.creatures().iter().map(WireCreature::from).collect(),
+                creatures: world
+                    .creatures_near(player.position)
+                    .iter()
+                    .map(WireCreature::from)
+                    .collect(),
             }
         }
         FrameBody::Leave { guid } => {
@@ -550,6 +679,34 @@ fn handle_request(
         } => with_world(maps, joined, |world| {
             world.select_gossip_option(mailbox, player, npc, option);
             FrameBody::Ack
+        }),
+        FrameBody::ListVendor { player, npc } => with_world(maps, joined, |world| {
+            world.list_vendor(mailbox, player, npc);
+            FrameBody::Ack
+        }),
+        FrameBody::BuyItem {
+            player,
+            npc,
+            item,
+            amount,
+        } => with_world(maps, joined, |world| {
+            world.buy_item(mailbox, player, npc, item, amount);
+            FrameBody::Ack
+        }),
+        FrameBody::OpenLoot { player, npc } => with_world(maps, joined, |world| {
+            world.open_loot(mailbox, player, npc);
+            FrameBody::Ack
+        }),
+        FrameBody::TakeLoot { player, index } => with_world(maps, joined, |world| {
+            world.take_loot(mailbox, player, index);
+            FrameBody::Ack
+        }),
+        FrameBody::CloseLoot { player } => with_world(maps, joined, |world| {
+            world.close_loot(mailbox, player);
+            FrameBody::Ack
+        }),
+        FrameBody::QueryItem { entry } => with_world(maps, joined, |world| FrameBody::Item {
+            item: world.item(entry),
         }),
         FrameBody::QueryPlayer { guid } => with_world(maps, joined, |world| FrameBody::Player {
             player: world.player(guid),

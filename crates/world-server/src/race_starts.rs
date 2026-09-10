@@ -1,7 +1,21 @@
+use std::collections::HashMap;
+
+use sqlx::{PgPool, Row};
 use wow_shared::{
-    CharacterArea, CharacterMap, CharacterRace, NORTHSHIRE_ORIENTATION, NORTHSHIRE_X, NORTHSHIRE_Y,
-    NORTHSHIRE_Z, Position,
+    CharacterArea, CharacterMap, CharacterRace, DbEnum, NORTHSHIRE_ORIENTATION, NORTHSHIRE_X,
+    NORTHSHIRE_Y, NORTHSHIRE_Z, Position,
 };
+
+const PLAYABLE_RACES: [CharacterRace; 8] = [
+    CharacterRace::Human,
+    CharacterRace::Orc,
+    CharacterRace::Dwarf,
+    CharacterRace::NightElf,
+    CharacterRace::Undead,
+    CharacterRace::Tauren,
+    CharacterRace::Gnome,
+    CharacterRace::Troll,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RaceStart {
@@ -76,13 +90,105 @@ const TAUREN: RaceStart = RaceStart {
     area: CharacterArea::CampNarache,
 };
 
-pub fn race_start(race: CharacterRace) -> RaceStart {
-    match race {
-        CharacterRace::Human => HUMAN,
-        CharacterRace::Orc | CharacterRace::Troll => ORC,
-        CharacterRace::Dwarf | CharacterRace::Gnome => DWARF,
-        CharacterRace::NightElf => NIGHT_ELF,
-        CharacterRace::Undead => UNDEAD,
-        CharacterRace::Tauren => TAUREN,
+#[derive(Debug, Clone)]
+pub struct RaceStarts {
+    by_race: HashMap<CharacterRace, RaceStart>,
+}
+
+impl RaceStarts {
+    pub fn builtin() -> Self {
+        let mut by_race = HashMap::with_capacity(PLAYABLE_RACES.len());
+        by_race.insert(CharacterRace::Human, HUMAN);
+        by_race.insert(CharacterRace::Orc, ORC);
+        by_race.insert(CharacterRace::Troll, ORC);
+        by_race.insert(CharacterRace::Dwarf, DWARF);
+        by_race.insert(CharacterRace::Gnome, DWARF);
+        by_race.insert(CharacterRace::NightElf, NIGHT_ELF);
+        by_race.insert(CharacterRace::Undead, UNDEAD);
+        by_race.insert(CharacterRace::Tauren, TAUREN);
+        Self { by_race }
+    }
+
+    pub async fn load(pool: &PgPool) -> anyhow::Result<Self> {
+        let rows = sqlx::query(
+            "SELECT race::text AS race, map_id::text AS map_id, x, y, z, orientation,
+                    area::text AS area
+             FROM race_start_positions",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let mut by_race = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let race_label: String = row.get("race");
+            let Some(race) = CharacterRace::from_str(&race_label) else {
+                tracing::warn!(race = %race_label, "skipped unknown race in race_start_positions");
+                continue;
+            };
+            let map_label: String = row.get("map_id");
+            let Some(map_id) = CharacterMap::from_str(&map_label) else {
+                anyhow::bail!("unknown map_id in race_start_positions for {race_label}: {map_label}");
+            };
+            let area_label: String = row.get("area");
+            let Some(area) = CharacterArea::from_str(&area_label) else {
+                anyhow::bail!("unknown area in race_start_positions for {race_label}: {area_label}");
+            };
+            by_race.insert(
+                race,
+                RaceStart {
+                    map_id,
+                    position: Position {
+                        x: row.get("x"),
+                        y: row.get("y"),
+                        z: row.get("z"),
+                        orientation: row.get("orientation"),
+                    },
+                    area,
+                },
+            );
+        }
+
+        for race in PLAYABLE_RACES {
+            anyhow::ensure!(
+                by_race.contains_key(&race),
+                "race_start_positions missing {}",
+                race.as_str()
+            );
+        }
+
+        tracing::info!(races = by_race.len(), "loaded race start positions");
+        Ok(Self { by_race })
+    }
+
+    pub fn get(&self, race: CharacterRace) -> anyhow::Result<RaceStart> {
+        self.by_race
+            .get(&race)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("missing race start for {}", race.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_covers_every_playable_race() {
+        let starts = RaceStarts::builtin();
+        for race in PLAYABLE_RACES {
+            starts.get(race).expect("builtin race start");
+        }
+        assert_eq!(
+            starts.get(CharacterRace::Gnome).unwrap(),
+            starts.get(CharacterRace::Dwarf).unwrap()
+        );
+        assert_eq!(
+            starts.get(CharacterRace::Troll).unwrap(),
+            starts.get(CharacterRace::Orc).unwrap()
+        );
+        assert_eq!(
+            starts.get(CharacterRace::Human).unwrap().position,
+            Position::NORTHSHIRE
+        );
     }
 }

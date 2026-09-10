@@ -1,4 +1,5 @@
 mod appearance;
+mod catalog;
 mod character_store;
 mod creature;
 mod db;
@@ -6,6 +7,7 @@ mod directory;
 mod map_handle;
 mod player;
 mod protocol;
+mod quest_director;
 mod race_starts;
 mod router;
 mod rpc;
@@ -19,6 +21,7 @@ use tokio::net::TcpListener;
 use wow_shared::{ShardFile, WorldConfig, WorldRole};
 
 use crate::character_store::CharacterStore;
+use crate::catalog::Catalog;
 use crate::directory::Directory;
 use crate::map_handle::MapHandle;
 use crate::router::MapRouter;
@@ -27,13 +30,16 @@ use crate::world::World;
 pub async fn serve(config: WorldConfig) -> anyhow::Result<()> {
     match config.role {
         WorldRole::Map => {
-            let _pool = db::connect_world(&config.database_url).await?;
-            serve_map_role(config).await
+            let pool = db::connect_world(&config.database_url).await?;
+            let catalog = load_catalog(&pool).await;
+            serve_map_role(config, catalog).await
         }
         WorldRole::Gateway | WorldRole::Combined => {
             let pool = db::connect_world(&config.database_url).await?;
+            let catalog = load_catalog(&pool).await;
+            let characters = CharacterStore::postgres(pool).await?;
             let listener = TcpListener::bind(config.bind).await?;
-            serve_gateway_role(listener, config, CharacterStore::postgres(pool)).await
+            serve_gateway_role(listener, config, characters, catalog).await
         }
     }
 }
@@ -55,13 +61,28 @@ pub async fn serve_with_listener(
         redis_url: None,
         database_url: String::new(),
     };
-    serve_gateway_role(listener, config, CharacterStore::memory()).await
+    serve_gateway_role(listener, config, CharacterStore::memory(), None).await
+}
+
+async fn load_catalog(pool: &sqlx::PgPool) -> Option<std::sync::Arc<Catalog>> {
+    match Catalog::load(pool).await {
+        Ok(catalog) if !catalog.is_empty() => Some(catalog),
+        Ok(_) => {
+            tracing::warn!("world catalog is empty; apply db/load.sh after migrate");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "world catalog not loaded");
+            None
+        }
+    }
 }
 
 async fn serve_gateway_role(
     listener: TcpListener,
     config: WorldConfig,
     characters: CharacterStore,
+    catalog: Option<std::sync::Arc<Catalog>>,
 ) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     tracing::info!(
@@ -73,7 +94,7 @@ async fn serve_gateway_role(
     );
 
     let directory = directory_from_config(&config);
-    let router = MapRouter::from_config(&config, directory);
+    let router = MapRouter::from_config(&config, directory, catalog);
     spawn_local_tickers(&router);
 
     loop {
@@ -98,11 +119,20 @@ async fn serve_gateway_role(
     }
 }
 
-async fn serve_map_role(config: WorldConfig) -> anyhow::Result<()> {
+async fn serve_map_role(
+    config: WorldConfig,
+    catalog: Option<std::sync::Arc<Catalog>>,
+) -> anyhow::Result<()> {
     let maps: HashMap<_, _> = config
         .hosted_maps()
         .into_iter()
-        .map(|map_id| (map_id, World::for_map(map_id)))
+        .map(|map_id| {
+            let world = match catalog.clone() {
+                Some(catalog) => World::with_catalog(map_id, catalog),
+                None => World::for_map(map_id),
+            };
+            (map_id, world)
+        })
         .collect();
     rpc::spawn_map_tickers(&maps);
     rpc::serve_maps(config.map_bind, maps).await

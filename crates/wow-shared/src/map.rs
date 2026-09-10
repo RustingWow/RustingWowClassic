@@ -1,4 +1,4 @@
-use crate::character_enums::CharacterMap;
+use crate::enums::CharacterMap;
 
 /// Vanilla continent and instance `map_id` values (loading-screen boundaries).
 pub const MAP_EASTERN_KINGDOMS: u32 = CharacterMap::EasternKingdoms.as_int();

@@ -191,7 +191,46 @@ impl ClientConnection {
             WorldEvent::GossipClosed => {
                 packets::gossip_closed(&mut self.writer, &mut self.encrypter).await
             }
+            WorldEvent::VendorOpened { npc, items } => {
+                packets::vendor_list(&mut self.writer, &mut self.encrypter, npc, items).await
+            }
+            WorldEvent::LootOpened { guid, gold, items } => {
+                packets::loot_opened(&mut self.writer, &mut self.encrypter, guid, gold, items).await
+            }
+            WorldEvent::LootTaken { index } => {
+                packets::loot_taken(&mut self.writer, &mut self.encrypter, index).await
+            }
+            WorldEvent::LootClosed { guid } => {
+                packets::loot_closed(&mut self.writer, &mut self.encrypter, guid).await
+            }
+            WorldEvent::MoneyChanged { guid, copper } => {
+                packets::money(&mut self.writer, &mut self.encrypter, guid, copper).await
+            }
+            WorldEvent::CreatureMoved {
+                guid,
+                from,
+                to,
+                duration_ms,
+            } => {
+                packets::creature_moved(
+                    &mut self.writer,
+                    &mut self.encrypter,
+                    guid,
+                    from,
+                    to,
+                    duration_ms,
+                )
+                .await
+            }
         }
+    }
+
+    pub async fn reply_item(
+        &mut self,
+        entry: u32,
+        item: Option<&crate::catalog::ItemRow>,
+    ) -> anyhow::Result<()> {
+        packets::item_query(&mut self.writer, &mut self.encrypter, entry, item).await
     }
 
     pub async fn reply_npc_text(&mut self, text_id: u32, text: Option<&str>) -> anyhow::Result<()> {

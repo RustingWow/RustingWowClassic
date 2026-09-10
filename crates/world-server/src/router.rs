@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use wow_shared::{ShardFile, WorldConfig};
 
+use crate::catalog::Catalog;
 use crate::creature::Creature;
 use crate::directory::Directory;
 use crate::map_handle::MapHandle;
@@ -25,10 +26,20 @@ pub struct MapRouter {
 }
 
 impl MapRouter {
-    pub fn local_maps(maps: impl IntoIterator<Item = u32>, directory: Directory) -> Self {
+    pub fn local_maps(
+        maps: impl IntoIterator<Item = u32>,
+        directory: Directory,
+        catalog: Option<std::sync::Arc<Catalog>>,
+    ) -> Self {
         let local = maps
             .into_iter()
-            .map(|map_id| (map_id, World::for_map(map_id)))
+            .map(|map_id| {
+                let world = match catalog.clone() {
+                    Some(catalog) => World::with_catalog(map_id, catalog),
+                    None => World::for_map(map_id),
+                };
+                (map_id, world)
+            })
             .collect();
         Self {
             local,
@@ -38,12 +49,16 @@ impl MapRouter {
     }
 
     pub fn from_shards(shards: &ShardFile, directory: Directory) -> Self {
-        Self::local_maps(shards.maps(), directory)
+        Self::local_maps(shards.maps(), directory, None)
     }
 
-    pub fn from_config(config: &WorldConfig, directory: Directory) -> Self {
+    pub fn from_config(
+        config: &WorldConfig,
+        directory: Directory,
+        catalog: Option<std::sync::Arc<Catalog>>,
+    ) -> Self {
         if config.map_endpoints.is_empty() {
-            Self::local_maps(config.hosted_maps(), directory)
+            Self::local_maps(config.hosted_maps(), directory, catalog)
         } else {
             Self {
                 local: HashMap::new(),
@@ -77,10 +92,11 @@ impl MapRouter {
         let world = self.local.get(&map_id)?;
         self.directory
             .register(player.guid, player.name.clone(), map_id, mailbox.clone());
+        let position = player.position;
         let others = MapHandle::join(world, player, mailbox);
         Some(JoinResult {
             others,
-            creatures: MapHandle::creatures(world),
+            creatures: world.creatures_near(position),
         })
     }
 

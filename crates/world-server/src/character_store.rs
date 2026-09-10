@@ -9,7 +9,7 @@ use wow_shared::{
 };
 
 use crate::appearance::{normalize_character_name, race_allowed};
-use crate::race_starts::{RaceStart, race_start};
+use crate::race_starts::{RaceStart, RaceStarts};
 
 const ACCOUNT_CHARACTER_LIMIT: usize = 10;
 
@@ -60,6 +60,7 @@ pub struct CharacterDraft {
 #[derive(Clone)]
 pub struct CharacterStore {
     inner: CharacterStoreInner,
+    starts: Arc<RaceStarts>,
 }
 
 #[derive(Clone)]
@@ -84,13 +85,16 @@ impl CharacterStore {
                 by_name: HashMap::new(),
                 by_account: HashMap::new(),
             }))),
+            starts: Arc::new(RaceStarts::builtin()),
         }
     }
 
-    pub fn postgres(pool: PgPool) -> Self {
-        Self {
+    pub async fn postgres(pool: PgPool) -> anyhow::Result<Self> {
+        let starts = RaceStarts::load(&pool).await?;
+        Ok(Self {
             inner: CharacterStoreInner::Postgres(pool),
-        }
+            starts: Arc::new(starts),
+        })
     }
 
     pub async fn list(&self, account_id: i64) -> anyhow::Result<Vec<CharacterTemplate>> {
@@ -173,7 +177,7 @@ impl CharacterStore {
         if !race_allowed(draft.race, draft.class) {
             return Err(CreateCharacterError::Disabled);
         }
-        let spawn = race_start(draft.race);
+        let spawn = self.starts.get(draft.race)?;
         match &self.inner {
             CharacterStoreInner::Memory(memory) => {
                 let mut inner = memory.lock().expect("character store mutex");

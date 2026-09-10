@@ -50,6 +50,24 @@ pub enum ClientAction {
     QueryNpcText {
         text_id: u32,
     },
+    ListVendor {
+        guid: u64,
+    },
+    BuyItem {
+        vendor: u64,
+        item: u32,
+        amount: u32,
+    },
+    QueryItem {
+        entry: u32,
+    },
+    Loot {
+        guid: u64,
+    },
+    LootItem {
+        index: u8,
+    },
+    LootRelease,
     LogoutRequest,
     PlayerLogout,
     LogoutCancel,
@@ -153,6 +171,24 @@ impl From<Incoming> for ClientAction {
                 ClientOpcodeMessage::CMSG_NPC_TEXT_QUERY(query) => Self::QueryNpcText {
                     text_id: query.text_id,
                 },
+                ClientOpcodeMessage::CMSG_LIST_INVENTORY(list) => Self::ListVendor {
+                    guid: list.guid.guid(),
+                },
+                ClientOpcodeMessage::CMSG_BUY_ITEM(buy) => Self::BuyItem {
+                    vendor: buy.vendor.guid(),
+                    item: buy.item,
+                    amount: u32::from(buy.amount.max(1)),
+                },
+                ClientOpcodeMessage::CMSG_ITEM_QUERY_SINGLE(query) => Self::QueryItem {
+                    entry: query.item,
+                },
+                ClientOpcodeMessage::CMSG_LOOT(loot) => Self::Loot {
+                    guid: loot.guid.guid(),
+                },
+                ClientOpcodeMessage::CMSG_AUTOSTORE_LOOT_ITEM(loot) => Self::LootItem {
+                    index: loot.item_slot,
+                },
+                ClientOpcodeMessage::CMSG_LOOT_RELEASE(_) => Self::LootRelease,
                 ClientOpcodeMessage::CMSG_LOGOUT_REQUEST => Self::LogoutRequest,
                 ClientOpcodeMessage::CMSG_PLAYER_LOGOUT => Self::PlayerLogout,
                 ClientOpcodeMessage::CMSG_LOGOUT_CANCEL => Self::LogoutCancel,

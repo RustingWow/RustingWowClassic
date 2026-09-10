@@ -31,3 +31,4 @@ mod combat;
 mod gossip;
 mod players;
 mod stand_state;
+mod visibility;
