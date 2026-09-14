@@ -139,6 +139,7 @@ async fn login(
         account_id: account.id,
         account: account.username.clone(),
         session_key: *server.session_key(),
+        gmlevel: account.gmlevel,
     });
     tracing::info!(account = %account.username, "authenticated");
 

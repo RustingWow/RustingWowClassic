@@ -15,6 +15,7 @@ fn say_reaches_speaker_and_nearby_player() {
             speaker: 2,
             channel: ChatChannel::Say,
             text: "hello".to_string(),
+            gm_tag: false,
         },
     );
 
@@ -49,6 +50,7 @@ fn whisper_reaches_named_player_and_informs_sender() {
                 to: "user1".to_string(),
             },
             text: "psst".to_string(),
+            gm_tag: false,
         },
     );
 
@@ -83,6 +85,7 @@ fn whisper_unknown_name_notifies_sender() {
                 to: "Nobody".to_string(),
             },
             text: "hey".to_string(),
+            gm_tag: false,
         },
     );
 

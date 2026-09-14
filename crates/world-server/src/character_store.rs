@@ -74,6 +74,19 @@ struct MemoryCharacters {
     by_guid: HashMap<u64, CharacterTemplate>,
     by_name: HashMap<String, u64>,
     by_account: HashMap<i64, Vec<u64>>,
+    quests: HashMap<u64, HashMap<u32, StoredQuest>>,
+}
+
+#[derive(Clone)]
+struct StoredQuest {
+    status: StoredQuestStatus,
+    kills: [u32; 4],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoredQuestStatus {
+    Active,
+    Rewarded,
 }
 
 impl CharacterStore {
@@ -84,6 +97,7 @@ impl CharacterStore {
                 by_guid: HashMap::new(),
                 by_name: HashMap::new(),
                 by_account: HashMap::new(),
+                quests: HashMap::new(),
             }))),
             starts: Arc::new(RaceStarts::builtin()),
         }
@@ -244,6 +258,158 @@ impl CharacterStore {
         }
     }
 
+    pub async fn load_quests(
+        &self,
+        guid: u64,
+    ) -> anyhow::Result<(Vec<crate::player::QuestLogEntry>, Vec<u32>)> {
+        match &self.inner {
+            CharacterStoreInner::Memory(memory) => {
+                let inner = memory.lock().expect("character store mutex");
+                let Some(rows) = inner.quests.get(&guid) else {
+                    return Ok((Vec::new(), Vec::new()));
+                };
+                let mut log = Vec::new();
+                let mut rewarded = Vec::new();
+                for (quest_id, row) in rows {
+                    match row.status {
+                        StoredQuestStatus::Active => log.push(crate::player::QuestLogEntry {
+                            quest_id: *quest_id,
+                            kills: row.kills,
+                            complete: false,
+                        }),
+                        StoredQuestStatus::Rewarded => rewarded.push(*quest_id),
+                    }
+                }
+                Ok((log, rewarded))
+            }
+            CharacterStoreInner::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT quest_id, status::text AS status, kill_count_0, kill_count_1,
+                            kill_count_2, kill_count_3
+                     FROM character_quests WHERE character_id = $1",
+                )
+                .bind(guid as i64)
+                .fetch_all(pool)
+                .await?;
+                let mut log = Vec::new();
+                let mut rewarded = Vec::new();
+                for row in rows {
+                    let quest_id = row.try_get::<i32, _>("quest_id")? as u32;
+                    let status: String = row.try_get("status")?;
+                    let kills = [
+                        row.try_get::<i32, _>("kill_count_0")? as u32,
+                        row.try_get::<i32, _>("kill_count_1")? as u32,
+                        row.try_get::<i32, _>("kill_count_2")? as u32,
+                        row.try_get::<i32, _>("kill_count_3")? as u32,
+                    ];
+                    if status == "REWARDED" {
+                        rewarded.push(quest_id);
+                    } else {
+                        log.push(crate::player::QuestLogEntry {
+                            quest_id,
+                            kills,
+                            complete: false,
+                        });
+                    }
+                }
+                Ok((log, rewarded))
+            }
+        }
+    }
+
+    pub async fn apply_quest_change(
+        &self,
+        guid: u64,
+        change: crate::quest::QuestStateChange,
+    ) -> anyhow::Result<()> {
+        match change {
+            crate::quest::QuestStateChange::Active {
+                quest_id,
+                kills,
+                complete: _,
+            } => {
+                self.upsert_quest(guid, quest_id, StoredQuestStatus::Active, kills)
+                    .await
+            }
+            crate::quest::QuestStateChange::Rewarded { quest_id } => {
+                self.upsert_quest(guid, quest_id, StoredQuestStatus::Rewarded, [0; 4])
+                    .await
+            }
+            crate::quest::QuestStateChange::Removed { quest_id } => {
+                self.remove_quest(guid, quest_id).await
+            }
+        }
+    }
+
+    async fn upsert_quest(
+        &self,
+        guid: u64,
+        quest_id: u32,
+        status: StoredQuestStatus,
+        kills: [u32; 4],
+    ) -> anyhow::Result<()> {
+        match &self.inner {
+            CharacterStoreInner::Memory(memory) => {
+                let mut inner = memory.lock().expect("character store mutex");
+                inner
+                    .quests
+                    .entry(guid)
+                    .or_default()
+                    .insert(quest_id, StoredQuest { status, kills });
+                Ok(())
+            }
+            CharacterStoreInner::Postgres(pool) => {
+                let status_label = match status {
+                    StoredQuestStatus::Active => "ACTIVE",
+                    StoredQuestStatus::Rewarded => "REWARDED",
+                };
+                sqlx::query(
+                    "INSERT INTO character_quests
+                        (character_id, quest_id, status, kill_count_0, kill_count_1, kill_count_2, kill_count_3)
+                     VALUES ($1, $2, $3::character_quest_status, $4, $5, $6, $7)
+                     ON CONFLICT (character_id, quest_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        kill_count_0 = EXCLUDED.kill_count_0,
+                        kill_count_1 = EXCLUDED.kill_count_1,
+                        kill_count_2 = EXCLUDED.kill_count_2,
+                        kill_count_3 = EXCLUDED.kill_count_3",
+                )
+                .bind(guid as i64)
+                .bind(quest_id as i32)
+                .bind(status_label)
+                .bind(kills[0] as i32)
+                .bind(kills[1] as i32)
+                .bind(kills[2] as i32)
+                .bind(kills[3] as i32)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn remove_quest(&self, guid: u64, quest_id: u32) -> anyhow::Result<()> {
+        match &self.inner {
+            CharacterStoreInner::Memory(memory) => {
+                let mut inner = memory.lock().expect("character store mutex");
+                if let Some(rows) = inner.quests.get_mut(&guid) {
+                    rows.remove(&quest_id);
+                }
+                Ok(())
+            }
+            CharacterStoreInner::Postgres(pool) => {
+                sqlx::query(
+                    "DELETE FROM character_quests WHERE character_id = $1 AND quest_id = $2",
+                )
+                .bind(guid as i64)
+                .bind(quest_id as i32)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
     pub async fn delete(&self, account_id: i64, guid: u64) -> anyhow::Result<bool> {
         match &self.inner {
             CharacterStoreInner::Memory(memory) => {
@@ -257,6 +423,7 @@ impl CharacterStore {
                 let name_key = character.name.to_ascii_lowercase();
                 inner.by_guid.remove(&guid);
                 inner.by_name.remove(&name_key);
+                inner.quests.remove(&guid);
                 if let Some(guids) = inner.by_account.get_mut(&account_id) {
                     guids.retain(|id| *id != guid);
                 }

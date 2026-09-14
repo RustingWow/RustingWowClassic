@@ -1,12 +1,15 @@
 mod appearance;
 mod catalog;
 mod character_store;
+mod command;
 mod creature;
 mod db;
 mod directory;
+mod gameobject;
 mod map_handle;
 mod player;
 mod protocol;
+mod quest;
 mod quest_director;
 mod race_starts;
 mod router;
@@ -15,13 +18,16 @@ mod session;
 mod world;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use client_data::FactionTemplates;
 use tokio::net::TcpListener;
 use wow_shared::{ShardFile, WorldConfig, WorldRole};
 
-use crate::character_store::CharacterStore;
 use crate::catalog::Catalog;
+use crate::character_store::CharacterStore;
+use crate::command::{AuthGmClient, CommandServices, TeleStore};
 use crate::directory::Directory;
 use crate::map_handle::MapHandle;
 use crate::router::MapRouter;
@@ -31,15 +37,32 @@ pub async fn serve(config: WorldConfig) -> anyhow::Result<()> {
     match config.role {
         WorldRole::Map => {
             let pool = db::connect_world(&config.database_url).await?;
-            let catalog = load_catalog(&pool).await;
+            let catalog = load_catalog(&pool, &config.dbc_dir).await;
             serve_map_role(config, catalog).await
         }
         WorldRole::Gateway | WorldRole::Combined => {
             let pool = db::connect_world(&config.database_url).await?;
-            let catalog = load_catalog(&pool).await;
+            let catalog = load_catalog(&pool, &config.dbc_dir).await;
+            let tele = match TeleStore::postgres(pool.clone()).await {
+                Ok(tele) => tele,
+                Err(error) => {
+                    tracing::warn!(%error, "game_tele not loaded; using builtin locations");
+                    TeleStore::memory()
+                }
+            };
             let characters = CharacterStore::postgres(pool).await?;
             let listener = TcpListener::bind(config.bind).await?;
-            serve_gateway_role(listener, config, characters, catalog).await
+            let services = CommandServices {
+                tele,
+                motd: std::sync::Arc::new(std::sync::Mutex::new(
+                    "Welcome to WoWServer.".to_string(),
+                )),
+                auth: Some(AuthGmClient::new(
+                    config.auth_internal_url.clone(),
+                    config.auth_internal_token.clone(),
+                )),
+            };
+            serve_gateway_role(listener, config, characters, catalog, services).await
         }
     }
 }
@@ -60,12 +83,22 @@ pub async fn serve_with_listener(
         map_endpoints: HashMap::new(),
         redis_url: None,
         database_url: String::new(),
+        auth_internal_token: None,
+        dbc_dir: PathBuf::from("data/dbc"),
     };
-    serve_gateway_role(listener, config, CharacterStore::memory(), None).await
+    serve_gateway_role(
+        listener,
+        config,
+        CharacterStore::memory(),
+        None,
+        CommandServices::memory(),
+    )
+    .await
 }
 
-async fn load_catalog(pool: &sqlx::PgPool) -> Option<std::sync::Arc<Catalog>> {
-    match Catalog::load(pool).await {
+async fn load_catalog(pool: &sqlx::PgPool, dbc_dir: &Path) -> Option<std::sync::Arc<Catalog>> {
+    let factions = FactionTemplates::load_or_builtin(dbc_dir);
+    match Catalog::load(pool, factions).await {
         Ok(catalog) if !catalog.is_empty() => Some(catalog),
         Ok(_) => {
             tracing::warn!("world catalog is empty; apply db/load.sh after migrate");
@@ -83,6 +116,7 @@ async fn serve_gateway_role(
     config: WorldConfig,
     characters: CharacterStore,
     catalog: Option<std::sync::Arc<Catalog>>,
+    services: CommandServices,
 ) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     tracing::info!(
@@ -96,6 +130,7 @@ async fn serve_gateway_role(
     let directory = directory_from_config(&config);
     let router = MapRouter::from_config(&config, directory, catalog);
     spawn_local_tickers(&router);
+    tracing::info!(%addr, role = ?config.role, "world-server ready");
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -103,6 +138,7 @@ async fn serve_gateway_role(
         let log_unhandled_packets = config.log_unhandled_packets;
         let router = router.clone();
         let characters = characters.clone();
+        let services = services.clone();
         tokio::spawn(async move {
             if let Err(error) = session::handle_client(
                 stream,
@@ -110,6 +146,7 @@ async fn serve_gateway_role(
                 log_unhandled_packets,
                 router,
                 characters,
+                services,
             )
             .await
             {

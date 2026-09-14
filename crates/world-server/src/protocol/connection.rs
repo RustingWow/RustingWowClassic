@@ -4,6 +4,7 @@ use wow_shared::{CharacterMap, CharacterTemplate};
 use wow_srp::vanilla_header::{EncrypterHalf, HeaderCrypto};
 
 use crate::creature::Creature;
+use crate::gameobject::GameObject;
 use crate::player::Player;
 use crate::protocol::action::ClientAction;
 use crate::protocol::packets;
@@ -113,8 +114,12 @@ impl ClientConnection {
         packets::logout_cancel_ack(&mut self.writer, &mut self.encrypter).await
     }
 
-    pub async fn enter_world(&mut self, character: &CharacterTemplate) -> anyhow::Result<()> {
-        packets::enter_world(&mut self.writer, &mut self.encrypter, character).await
+    pub async fn enter_world(
+        &mut self,
+        character: &CharacterTemplate,
+        player: &Player,
+    ) -> anyhow::Result<()> {
+        packets::enter_world(&mut self.writer, &mut self.encrypter, character, player).await
     }
 
     #[allow(dead_code)]
@@ -134,6 +139,10 @@ impl ClientConnection {
         packets::appear_creatures(&mut self.writer, &mut self.encrypter, creatures).await
     }
 
+    pub async fn show_gameobjects(&mut self, objects: &[GameObject]) -> anyhow::Result<()> {
+        packets::appear_gameobjects(&mut self.writer, &mut self.encrypter, objects).await
+    }
+
     pub async fn reply_name(&mut self, guid: u64, player: &Player) -> anyhow::Result<()> {
         packets::name_reply(&mut self.writer, &mut self.encrypter, guid, player).await
     }
@@ -144,6 +153,14 @@ impl ClientConnection {
         creature: Option<&Creature>,
     ) -> anyhow::Result<()> {
         packets::creature_query(&mut self.writer, &mut self.encrypter, entry, creature).await
+    }
+
+    pub async fn reply_gameobject(
+        &mut self,
+        entry: u32,
+        object: Option<&GameObject>,
+    ) -> anyhow::Result<()> {
+        packets::gameobject_query(&mut self.writer, &mut self.encrypter, entry, object).await
     }
 
     pub async fn apply(&mut self, event: WorldEvent) -> anyhow::Result<()> {
@@ -169,6 +186,13 @@ impl ClientConnection {
             WorldEvent::CreatureLeft { guid } => {
                 packets::hide_player(&mut self.writer, &mut self.encrypter, guid).await
             }
+            WorldEvent::GameObjectAppeared(object) => {
+                let objects = [object];
+                self.show_gameobjects(&objects).await
+            }
+            WorldEvent::GameObjectLeft { guid } => {
+                packets::hide_player(&mut self.writer, &mut self.encrypter, guid).await
+            }
             WorldEvent::AttackStarted(attack) => {
                 packets::attack_start(&mut self.writer, &mut self.encrypter, attack).await
             }
@@ -185,17 +209,74 @@ impl ClientConnection {
                 packets::player_stand_state(&mut self.writer, &mut self.encrypter, guid, state)
                     .await
             }
-            WorldEvent::GossipOpened { npc, menu } => {
-                packets::gossip_opened(&mut self.writer, &mut self.encrypter, npc, menu).await
+            WorldEvent::GossipOpened {
+                npc,
+                menu,
+                quests,
+                pages,
+            } => {
+                packets::gossip_opened(
+                    &mut self.writer,
+                    &mut self.encrypter,
+                    npc,
+                    menu,
+                    quests,
+                    pages,
+                )
+                .await
             }
             WorldEvent::GossipClosed => {
                 packets::gossip_closed(&mut self.writer, &mut self.encrypter).await
             }
+            WorldEvent::QuestGiverStatus { npc, status } => {
+                packets::questgiver_status(&mut self.writer, &mut self.encrypter, npc, status).await
+            }
+            WorldEvent::QuestList { npc, title, quests } => {
+                packets::quest_list(&mut self.writer, &mut self.encrypter, npc, title, quests).await
+            }
+            WorldEvent::QuestDetails { npc, quest } => {
+                packets::quest_details(&mut self.writer, &mut self.encrypter, npc, quest).await
+            }
+            WorldEvent::QuestLogFull => {
+                packets::quest_log_full(&mut self.writer, &mut self.encrypter).await
+            }
+            WorldEvent::QuestLogUpdate { player } => {
+                packets::quest_log_update(&mut self.writer, &mut self.encrypter, &player).await
+            }
+            WorldEvent::QuestOfferReward { npc, quest } => {
+                packets::quest_offer_reward(&mut self.writer, &mut self.encrypter, npc, quest).await
+            }
+            WorldEvent::QuestTurnedIn {
+                quest_id,
+                copper,
+                items,
+            } => {
+                packets::quest_complete(
+                    &mut self.writer,
+                    &mut self.encrypter,
+                    quest_id,
+                    copper,
+                    items,
+                )
+                .await
+            }
+            WorldEvent::QuestKillCredit { victim, credit } => {
+                packets::quest_kill_credit(&mut self.writer, &mut self.encrypter, victim, credit)
+                    .await
+            }
+            WorldEvent::QuestObjectivesDone { quest_id } => {
+                packets::quest_objectives_done(&mut self.writer, &mut self.encrypter, quest_id)
+                    .await
+            }
+            WorldEvent::QuestStateChanged { .. } => Ok(()),
             WorldEvent::VendorOpened { npc, items } => {
                 packets::vendor_list(&mut self.writer, &mut self.encrypter, npc, items).await
             }
             WorldEvent::LootOpened { guid, gold, items } => {
                 packets::loot_opened(&mut self.writer, &mut self.encrypter, guid, gold, items).await
+            }
+            WorldEvent::LootFailed { guid, error } => {
+                packets::loot_failed(&mut self.writer, &mut self.encrypter, guid, error).await
             }
             WorldEvent::LootTaken { index } => {
                 packets::loot_taken(&mut self.writer, &mut self.encrypter, index).await
@@ -206,6 +287,10 @@ impl ClientConnection {
             WorldEvent::MoneyChanged { guid, copper } => {
                 packets::money(&mut self.writer, &mut self.encrypter, guid, copper).await
             }
+            WorldEvent::Notification { text } => {
+                packets::notification(&mut self.writer, &mut self.encrypter, text).await
+            }
+            WorldEvent::ForcedTeleport { .. } => Ok(()),
             WorldEvent::CreatureMoved {
                 guid,
                 from,
@@ -233,14 +318,22 @@ impl ClientConnection {
         packets::item_query(&mut self.writer, &mut self.encrypter, entry, item).await
     }
 
-    pub async fn reply_npc_text(&mut self, text_id: u32, text: Option<&str>) -> anyhow::Result<()> {
-        packets::npc_text_update(
-            &mut self.writer,
-            &mut self.encrypter,
-            text_id,
-            text.unwrap_or(""),
-        )
-        .await
+    pub async fn reply_npc_text(
+        &mut self,
+        text_id: u32,
+        pages: &[crate::catalog::NpcTextPage; 8],
+    ) -> anyhow::Result<()> {
+        packets::npc_text_update(&mut self.writer, &mut self.encrypter, text_id, pages).await
+    }
+
+    pub async fn reply_quest(
+        &mut self,
+        quest: Option<&crate::catalog::QuestRow>,
+    ) -> anyhow::Result<()> {
+        let Some(quest) = quest else {
+            return Ok(());
+        };
+        packets::quest_query(&mut self.writer, &mut self.encrypter, quest).await
     }
 
     async fn replay_movement(&mut self, movement: Movement) -> anyhow::Result<()> {

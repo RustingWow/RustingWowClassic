@@ -127,11 +127,15 @@ impl RaceStarts {
             };
             let map_label: String = row.get("map_id");
             let Some(map_id) = CharacterMap::from_str(&map_label) else {
-                anyhow::bail!("unknown map_id in race_start_positions for {race_label}: {map_label}");
+                anyhow::bail!(
+                    "unknown map_id in race_start_positions for {race_label}: {map_label}"
+                );
             };
             let area_label: String = row.get("area");
             let Some(area) = CharacterArea::from_str(&area_label) else {
-                anyhow::bail!("unknown area in race_start_positions for {race_label}: {area_label}");
+                anyhow::bail!(
+                    "unknown area in race_start_positions for {race_label}: {area_label}"
+                );
             };
             by_race.insert(
                 race,

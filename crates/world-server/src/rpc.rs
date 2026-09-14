@@ -11,9 +11,11 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use wow_shared::Position;
 use wow_world_messages::vanilla::CreatureFamily;
 
-use crate::catalog::ItemRow;
+use crate::catalog::{ItemRow, NpcTextPage, QuestRow};
 use crate::creature::{Creature, Gossip, GossipMenu};
+use crate::gameobject::GameObject;
 use crate::player::Player;
+use crate::quest::{GossipQuestItem, KillCredit, QuestStateChange};
 use crate::world::{
     Attack, Chat, LootOffer, MeleeHit, Movement, PlayerMailbox, SpokenChat, VendorOffer, World,
     WorldEvent,
@@ -34,6 +36,7 @@ enum FrameBody {
     JoinOk {
         others: Vec<Player>,
         creatures: Vec<WireCreature>,
+        gameobjects: Vec<GameObject>,
     },
     Leave {
         guid: u64,
@@ -107,11 +110,59 @@ enum FrameBody {
     Creature {
         creature: Option<WireCreature>,
     },
+    QueryGameObject {
+        guid: u64,
+    },
+    QueryGameObjectEntry {
+        entry: u32,
+    },
+    GameObject {
+        object: Option<GameObject>,
+    },
     QueryNpcText {
         text_id: u32,
     },
     NpcText {
-        text: Option<String>,
+        pages: [NpcTextPage; 8],
+    },
+    QueryQuest {
+        entry: u32,
+    },
+    Quest {
+        quest: Option<QuestRow>,
+    },
+    QuestGiverStatus {
+        player: u64,
+        npc: u64,
+    },
+    QuestGiverHello {
+        player: u64,
+        npc: u64,
+    },
+    QuestGiverQuery {
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+    },
+    QuestGiverAccept {
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+    },
+    QuestGiverComplete {
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+    },
+    QuestGiverChooseReward {
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+        reward: u32,
+    },
+    QuestLogRemove {
+        player: u64,
+        slot: u8,
     },
     Ack,
     Event(WireEvent),
@@ -121,24 +172,109 @@ enum FrameBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum WireEvent {
     PlayerAppeared(Player),
-    PlayerLeft { guid: u64 },
-    PlayerMoved { guid: u64, position: Position },
+    PlayerLeft {
+        guid: u64,
+    },
+    PlayerMoved {
+        guid: u64,
+        position: Position,
+    },
     Chat(SpokenChat),
-    ChatPlayerNotFound { name: String },
+    ChatPlayerNotFound {
+        name: String,
+    },
     CreatureAppeared(WireCreature),
-    CreatureLeft { guid: u64 },
+    CreatureLeft {
+        guid: u64,
+    },
+    GameObjectAppeared(GameObject),
+    GameObjectLeft {
+        guid: u64,
+    },
     AttackStarted(Attack),
     AttackStopped(Attack),
     MeleeHit(MeleeHit),
-    StandStateAck { state: u8 },
-    PlayerStandState { guid: u64, state: u8 },
-    GossipOpened { npc: u64, menu: GossipMenu },
+    StandStateAck {
+        state: u8,
+    },
+    PlayerStandState {
+        guid: u64,
+        state: u8,
+    },
+    GossipOpened {
+        npc: u64,
+        menu: GossipMenu,
+        quests: Vec<GossipQuestItem>,
+        pages: [NpcTextPage; 8],
+    },
     GossipClosed,
-    VendorOpened { npc: u64, items: Vec<VendorOffer> },
-    LootOpened { guid: u64, gold: u32, items: Vec<LootOffer> },
-    LootTaken { index: u8 },
-    LootClosed { guid: u64 },
-    MoneyChanged { guid: u64, copper: u32 },
+    QuestGiverStatus {
+        npc: u64,
+        status: u32,
+    },
+    QuestList {
+        npc: u64,
+        title: String,
+        quests: Vec<GossipQuestItem>,
+    },
+    QuestDetails {
+        npc: u64,
+        quest: QuestRow,
+    },
+    QuestLogFull,
+    QuestLogUpdate {
+        player: Player,
+    },
+    QuestOfferReward {
+        npc: u64,
+        quest: QuestRow,
+    },
+    QuestTurnedIn {
+        quest_id: u32,
+        copper: u32,
+        items: Vec<(u32, u32)>,
+    },
+    QuestKillCredit {
+        victim: u64,
+        credit: KillCredit,
+    },
+    QuestObjectivesDone {
+        quest_id: u32,
+    },
+    QuestStateChanged {
+        guid: u64,
+        change: QuestStateChange,
+    },
+    VendorOpened {
+        npc: u64,
+        items: Vec<VendorOffer>,
+    },
+    LootOpened {
+        guid: u64,
+        gold: u32,
+        items: Vec<LootOffer>,
+    },
+    LootFailed {
+        guid: u64,
+        error: u8,
+    },
+    LootTaken {
+        index: u8,
+    },
+    LootClosed {
+        guid: u64,
+    },
+    MoneyChanged {
+        guid: u64,
+        copper: u32,
+    },
+    Notification {
+        text: String,
+    },
+    ForcedTeleport {
+        map_id: u32,
+        position: Position,
+    },
     CreatureMoved {
         guid: u64,
         from: Position,
@@ -165,6 +301,8 @@ struct WireCreature {
     civilian: bool,
     hostile: bool,
     dead: bool,
+    #[serde(default)]
+    lootable: bool,
     gossip: Option<Gossip>,
     loot_id: i32,
     respawn_secs: u32,
@@ -190,6 +328,7 @@ impl From<&Creature> for WireCreature {
             civilian: creature.civilian,
             hostile: creature.hostile,
             dead: creature.dead,
+            lootable: creature.lootable,
             gossip: creature.gossip.clone(),
             loot_id: creature.loot_id,
             respawn_secs: creature.respawn_secs,
@@ -217,6 +356,7 @@ impl From<WireCreature> for Creature {
             civilian: wire.civilian,
             hostile: wire.hostile,
             dead: wire.dead,
+            lootable: wire.lootable,
             gossip: wire.gossip,
             loot_id: wire.loot_id,
             respawn_secs: wire.respawn_secs,
@@ -253,18 +393,57 @@ fn event_to_wire(event: WorldEvent) -> WireEvent {
             WireEvent::CreatureAppeared(WireCreature::from(&creature))
         }
         WorldEvent::CreatureLeft { guid } => WireEvent::CreatureLeft { guid },
+        WorldEvent::GameObjectAppeared(object) => WireEvent::GameObjectAppeared(object),
+        WorldEvent::GameObjectLeft { guid } => WireEvent::GameObjectLeft { guid },
         WorldEvent::AttackStarted(attack) => WireEvent::AttackStarted(attack),
         WorldEvent::AttackStopped(attack) => WireEvent::AttackStopped(attack),
         WorldEvent::MeleeHit(hit) => WireEvent::MeleeHit(hit),
         WorldEvent::StandStateAck { state } => WireEvent::StandStateAck { state },
         WorldEvent::PlayerStandState { guid, state } => WireEvent::PlayerStandState { guid, state },
-        WorldEvent::GossipOpened { npc, menu } => WireEvent::GossipOpened { npc, menu },
+        WorldEvent::GossipOpened {
+            npc,
+            menu,
+            quests,
+            pages,
+        } => WireEvent::GossipOpened {
+            npc,
+            menu,
+            quests,
+            pages,
+        },
         WorldEvent::GossipClosed => WireEvent::GossipClosed,
+        WorldEvent::QuestGiverStatus { npc, status } => WireEvent::QuestGiverStatus { npc, status },
+        WorldEvent::QuestList { npc, title, quests } => WireEvent::QuestList { npc, title, quests },
+        WorldEvent::QuestDetails { npc, quest } => WireEvent::QuestDetails { npc, quest },
+        WorldEvent::QuestLogFull => WireEvent::QuestLogFull,
+        WorldEvent::QuestLogUpdate { player } => WireEvent::QuestLogUpdate { player },
+        WorldEvent::QuestOfferReward { npc, quest } => WireEvent::QuestOfferReward { npc, quest },
+        WorldEvent::QuestTurnedIn {
+            quest_id,
+            copper,
+            items,
+        } => WireEvent::QuestTurnedIn {
+            quest_id,
+            copper,
+            items,
+        },
+        WorldEvent::QuestKillCredit { victim, credit } => {
+            WireEvent::QuestKillCredit { victim, credit }
+        }
+        WorldEvent::QuestObjectivesDone { quest_id } => WireEvent::QuestObjectivesDone { quest_id },
+        WorldEvent::QuestStateChanged { guid, change } => {
+            WireEvent::QuestStateChanged { guid, change }
+        }
         WorldEvent::VendorOpened { npc, items } => WireEvent::VendorOpened { npc, items },
         WorldEvent::LootOpened { guid, gold, items } => WireEvent::LootOpened { guid, gold, items },
+        WorldEvent::LootFailed { guid, error } => WireEvent::LootFailed { guid, error },
         WorldEvent::LootTaken { index } => WireEvent::LootTaken { index },
         WorldEvent::LootClosed { guid } => WireEvent::LootClosed { guid },
         WorldEvent::MoneyChanged { guid, copper } => WireEvent::MoneyChanged { guid, copper },
+        WorldEvent::Notification { text } => WireEvent::Notification { text },
+        WorldEvent::ForcedTeleport { map_id, position } => {
+            WireEvent::ForcedTeleport { map_id, position }
+        }
         WorldEvent::CreatureMoved {
             guid,
             from,
@@ -290,18 +469,57 @@ fn event_from_wire(event: WireEvent) -> WorldEvent {
         WireEvent::ChatPlayerNotFound { name } => WorldEvent::ChatPlayerNotFound { name },
         WireEvent::CreatureAppeared(creature) => WorldEvent::CreatureAppeared(creature.into()),
         WireEvent::CreatureLeft { guid } => WorldEvent::CreatureLeft { guid },
+        WireEvent::GameObjectAppeared(object) => WorldEvent::GameObjectAppeared(object),
+        WireEvent::GameObjectLeft { guid } => WorldEvent::GameObjectLeft { guid },
         WireEvent::AttackStarted(attack) => WorldEvent::AttackStarted(attack),
         WireEvent::AttackStopped(attack) => WorldEvent::AttackStopped(attack),
         WireEvent::MeleeHit(hit) => WorldEvent::MeleeHit(hit),
         WireEvent::StandStateAck { state } => WorldEvent::StandStateAck { state },
         WireEvent::PlayerStandState { guid, state } => WorldEvent::PlayerStandState { guid, state },
-        WireEvent::GossipOpened { npc, menu } => WorldEvent::GossipOpened { npc, menu },
+        WireEvent::GossipOpened {
+            npc,
+            menu,
+            quests,
+            pages,
+        } => WorldEvent::GossipOpened {
+            npc,
+            menu,
+            quests,
+            pages,
+        },
         WireEvent::GossipClosed => WorldEvent::GossipClosed,
+        WireEvent::QuestGiverStatus { npc, status } => WorldEvent::QuestGiverStatus { npc, status },
+        WireEvent::QuestList { npc, title, quests } => WorldEvent::QuestList { npc, title, quests },
+        WireEvent::QuestDetails { npc, quest } => WorldEvent::QuestDetails { npc, quest },
+        WireEvent::QuestLogFull => WorldEvent::QuestLogFull,
+        WireEvent::QuestLogUpdate { player } => WorldEvent::QuestLogUpdate { player },
+        WireEvent::QuestOfferReward { npc, quest } => WorldEvent::QuestOfferReward { npc, quest },
+        WireEvent::QuestTurnedIn {
+            quest_id,
+            copper,
+            items,
+        } => WorldEvent::QuestTurnedIn {
+            quest_id,
+            copper,
+            items,
+        },
+        WireEvent::QuestKillCredit { victim, credit } => {
+            WorldEvent::QuestKillCredit { victim, credit }
+        }
+        WireEvent::QuestObjectivesDone { quest_id } => WorldEvent::QuestObjectivesDone { quest_id },
+        WireEvent::QuestStateChanged { guid, change } => {
+            WorldEvent::QuestStateChanged { guid, change }
+        }
         WireEvent::VendorOpened { npc, items } => WorldEvent::VendorOpened { npc, items },
         WireEvent::LootOpened { guid, gold, items } => WorldEvent::LootOpened { guid, gold, items },
+        WireEvent::LootFailed { guid, error } => WorldEvent::LootFailed { guid, error },
         WireEvent::LootTaken { index } => WorldEvent::LootTaken { index },
         WireEvent::LootClosed { guid } => WorldEvent::LootClosed { guid },
         WireEvent::MoneyChanged { guid, copper } => WorldEvent::MoneyChanged { guid, copper },
+        WireEvent::Notification { text } => WorldEvent::Notification { text },
+        WireEvent::ForcedTeleport { map_id, position } => {
+            WorldEvent::ForcedTeleport { map_id, position }
+        }
         WireEvent::CreatureMoved {
             guid,
             from,
@@ -407,7 +625,10 @@ impl MapSession {
             .map_err(|_| anyhow::anyhow!("map session closed"))
     }
 
-    pub async fn join(&self, player: Player) -> anyhow::Result<(Vec<Player>, Vec<Creature>)> {
+    pub async fn join(
+        &self,
+        player: Player,
+    ) -> anyhow::Result<(Vec<Player>, Vec<Creature>, Vec<GameObject>)> {
         match self
             .request(FrameBody::Join {
                 map_id: self.map_id,
@@ -415,9 +636,15 @@ impl MapSession {
             })
             .await?
         {
-            FrameBody::JoinOk { others, creatures } => {
-                Ok((others, creatures.into_iter().map(Into::into).collect()))
-            }
+            FrameBody::JoinOk {
+                others,
+                creatures,
+                gameobjects,
+            } => Ok((
+                others,
+                creatures.into_iter().map(Into::into).collect(),
+                gameobjects,
+            )),
             FrameBody::Error(error) => anyhow::bail!(error),
             _ => anyhow::bail!("unexpected join response"),
         }
@@ -536,11 +763,105 @@ impl MapSession {
         }
     }
 
-    pub async fn npc_text(&self, text_id: u32) -> anyhow::Result<Option<String>> {
+    pub async fn gameobject(&self, guid: u64) -> anyhow::Result<Option<GameObject>> {
+        match self.request(FrameBody::QueryGameObject { guid }).await? {
+            FrameBody::GameObject { object } => Ok(object),
+            other => anyhow::bail!("unexpected gameobject response: {other:?}"),
+        }
+    }
+
+    pub async fn gameobject_by_entry(&self, entry: u32) -> anyhow::Result<Option<GameObject>> {
+        match self
+            .request(FrameBody::QueryGameObjectEntry { entry })
+            .await?
+        {
+            FrameBody::GameObject { object } => Ok(object),
+            other => anyhow::bail!("unexpected gameobject response: {other:?}"),
+        }
+    }
+
+    pub async fn npc_text_pages(&self, text_id: u32) -> anyhow::Result<[NpcTextPage; 8]> {
         match self.request(FrameBody::QueryNpcText { text_id }).await? {
-            FrameBody::NpcText { text } => Ok(text),
+            FrameBody::NpcText { pages } => Ok(pages),
             other => anyhow::bail!("unexpected npc text response: {other:?}"),
         }
+    }
+
+    pub async fn quest(&self, entry: u32) -> anyhow::Result<Option<QuestRow>> {
+        match self.request(FrameBody::QueryQuest { entry }).await? {
+            FrameBody::Quest { quest } => Ok(quest),
+            other => anyhow::bail!("unexpected quest response: {other:?}"),
+        }
+    }
+
+    pub async fn questgiver_status(&self, player: u64, npc: u64) -> anyhow::Result<()> {
+        self.request(FrameBody::QuestGiverStatus { player, npc })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn open_questgiver(&self, player: u64, npc: u64) -> anyhow::Result<()> {
+        self.request(FrameBody::QuestGiverHello { player, npc })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn query_quest_details(
+        &self,
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+    ) -> anyhow::Result<()> {
+        self.request(FrameBody::QuestGiverQuery {
+            player,
+            npc,
+            quest_id,
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn accept_quest(&self, player: u64, npc: u64, quest_id: u32) -> anyhow::Result<()> {
+        self.request(FrameBody::QuestGiverAccept {
+            player,
+            npc,
+            quest_id,
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn complete_quest(&self, player: u64, npc: u64, quest_id: u32) -> anyhow::Result<()> {
+        self.request(FrameBody::QuestGiverComplete {
+            player,
+            npc,
+            quest_id,
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn choose_quest_reward(
+        &self,
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+        reward: u32,
+    ) -> anyhow::Result<()> {
+        self.request(FrameBody::QuestGiverChooseReward {
+            player,
+            npc,
+            quest_id,
+            reward,
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn abandon_quest(&self, player: u64, slot: u8) -> anyhow::Result<()> {
+        self.request(FrameBody::QuestLogRemove { player, slot })
+            .await?;
+        Ok(())
     }
 }
 
@@ -555,6 +876,7 @@ pub async fn serve_maps_listener(
 ) -> anyhow::Result<()> {
     let bind = listener.local_addr()?;
     tracing::info!(%bind, maps = maps.len(), "map-server listening");
+    tracing::info!(%bind, maps = maps.len(), "map-server ready");
     let maps = Arc::new(maps);
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -637,6 +959,7 @@ fn handle_request(
                     .iter()
                     .map(WireCreature::from)
                     .collect(),
+                gameobjects: world.gameobjects_near(player.position),
             }
         }
         FrameBody::Leave { guid } => {
@@ -724,11 +1047,69 @@ fn handle_request(
                     .map(WireCreature::from),
             })
         }
-        FrameBody::QueryNpcText { text_id } => {
-            with_world(maps, joined, |world| FrameBody::NpcText {
-                text: world.npc_text(text_id),
+        FrameBody::QueryGameObject { guid } => {
+            with_world(maps, joined, |world| FrameBody::GameObject {
+                object: world.gameobject(guid),
             })
         }
+        FrameBody::QueryGameObjectEntry { entry } => {
+            with_world(maps, joined, |world| FrameBody::GameObject {
+                object: world.gameobject_by_entry(entry),
+            })
+        }
+        FrameBody::QueryNpcText { text_id } => {
+            with_world(maps, joined, |world| FrameBody::NpcText {
+                pages: world.npc_text_pages(text_id),
+            })
+        }
+        FrameBody::QueryQuest { entry } => with_world(maps, joined, |world| FrameBody::Quest {
+            quest: world.quest(entry),
+        }),
+        FrameBody::QuestGiverStatus { player, npc } => with_world(maps, joined, |world| {
+            world.questgiver_status(mailbox, player, npc);
+            FrameBody::Ack
+        }),
+        FrameBody::QuestGiverHello { player, npc } => with_world(maps, joined, |world| {
+            world.open_questgiver(mailbox, player, npc);
+            FrameBody::Ack
+        }),
+        FrameBody::QuestGiverQuery {
+            player,
+            npc,
+            quest_id,
+        } => with_world(maps, joined, |world| {
+            world.query_quest_details(mailbox, player, npc, quest_id);
+            FrameBody::Ack
+        }),
+        FrameBody::QuestGiverAccept {
+            player,
+            npc,
+            quest_id,
+        } => with_world(maps, joined, |world| {
+            world.accept_quest(mailbox, player, npc, quest_id);
+            FrameBody::Ack
+        }),
+        FrameBody::QuestGiverComplete {
+            player,
+            npc,
+            quest_id,
+        } => with_world(maps, joined, |world| {
+            world.complete_quest(mailbox, player, npc, quest_id);
+            FrameBody::Ack
+        }),
+        FrameBody::QuestGiverChooseReward {
+            player,
+            npc,
+            quest_id,
+            reward,
+        } => with_world(maps, joined, |world| {
+            world.choose_quest_reward(mailbox, player, npc, quest_id, reward);
+            FrameBody::Ack
+        }),
+        FrameBody::QuestLogRemove { player, slot } => with_world(maps, joined, |world| {
+            world.abandon_quest(mailbox, player, slot);
+            FrameBody::Ack
+        }),
         other => FrameBody::Error(format!("not a request: {other:?}")),
     }
 }
@@ -779,7 +1160,7 @@ mod tests {
             .await
             .unwrap();
         let player = Player::new(1, "User1", Position::NORTHSHIRE);
-        let (others, creatures) = session.join(player).await.unwrap();
+        let (others, creatures, _gameobjects) = session.join(player).await.unwrap();
         assert!(others.is_empty());
         assert!(!creatures.is_empty());
     }

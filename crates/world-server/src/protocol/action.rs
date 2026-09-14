@@ -32,7 +32,13 @@ pub enum ClientAction {
         entry: u32,
         guid: u64,
     },
-    Select,
+    QueryGameObject {
+        entry: u32,
+        guid: u64,
+    },
+    Select {
+        guid: u64,
+    },
     Attack {
         guid: u64,
     },
@@ -49,6 +55,35 @@ pub enum ClientAction {
     },
     QueryNpcText {
         text_id: u32,
+    },
+    QueryQuest {
+        quest_id: u32,
+    },
+    QuestGiverStatus {
+        guid: u64,
+    },
+    QuestGiverHello {
+        guid: u64,
+    },
+    QuestGiverQuery {
+        guid: u64,
+        quest_id: u32,
+    },
+    QuestGiverAccept {
+        guid: u64,
+        quest_id: u32,
+    },
+    QuestGiverComplete {
+        guid: u64,
+        quest_id: u32,
+    },
+    QuestGiverChooseReward {
+        guid: u64,
+        quest_id: u32,
+        reward: u32,
+    },
+    QuestLogRemove {
+        slot: u8,
     },
     ListVendor {
         guid: u64,
@@ -74,11 +109,13 @@ pub enum ClientAction {
     Moved(PendingMove),
     Chat(PendingChat),
     Ignored(IgnoredAction),
+    Noop,
 }
 
 pub struct IgnoredAction {
     pub opcode: Option<u32>,
     pub name: Option<String>,
+    pub body_len: Option<usize>,
 }
 
 pub struct PendingMove {
@@ -93,7 +130,7 @@ impl PendingMove {
 
 pub struct PendingChat {
     channel: ChatChannel,
-    text: String,
+    pub text: String,
 }
 
 impl PendingChat {
@@ -102,6 +139,7 @@ impl PendingChat {
             speaker,
             channel: self.channel,
             text: self.text,
+            gm_tag: false,
         }
     }
 }
@@ -109,9 +147,14 @@ impl PendingChat {
 impl From<Incoming> for ClientAction {
     fn from(incoming: Incoming) -> Self {
         match incoming {
-            Incoming::Skipped { opcode, name } => Self::Ignored(IgnoredAction {
+            Incoming::Skipped {
+                opcode,
+                name,
+                body_len,
+            } => Self::Ignored(IgnoredAction {
                 opcode: Some(opcode),
                 name: name.map(str::to_string),
+                body_len: Some(body_len),
             }),
             Incoming::Message(message) => match message {
                 ClientOpcodeMessage::CMSG_PING(ping) => Self::Ping {
@@ -153,11 +196,18 @@ impl From<Incoming> for ClientAction {
                     entry: query.creature,
                     guid: query.guid.guid(),
                 },
-                ClientOpcodeMessage::CMSG_SET_SELECTION(_) => Self::Select,
+                ClientOpcodeMessage::CMSG_GAMEOBJECT_QUERY(query) => Self::QueryGameObject {
+                    entry: query.entry_id,
+                    guid: query.guid.guid(),
+                },
+                ClientOpcodeMessage::CMSG_SET_SELECTION(select) => Self::Select {
+                    guid: select.target.guid(),
+                },
                 ClientOpcodeMessage::CMSG_ATTACKSWING(swing) => Self::Attack {
                     guid: swing.guid.guid(),
                 },
                 ClientOpcodeMessage::CMSG_ATTACKSTOP => Self::StopAttack,
+                ClientOpcodeMessage::CMSG_SETSHEATHED(_) => Self::Noop,
                 ClientOpcodeMessage::CMSG_STANDSTATECHANGE(change) => Self::ChangeStandState {
                     state: change.animation_state.as_int(),
                 },
@@ -171,6 +221,43 @@ impl From<Incoming> for ClientAction {
                 ClientOpcodeMessage::CMSG_NPC_TEXT_QUERY(query) => Self::QueryNpcText {
                     text_id: query.text_id,
                 },
+                ClientOpcodeMessage::CMSG_QUEST_QUERY(query) => Self::QueryQuest {
+                    quest_id: query.quest_id,
+                },
+                ClientOpcodeMessage::CMSG_QUESTGIVER_STATUS_QUERY(query) => {
+                    Self::QuestGiverStatus {
+                        guid: query.guid.guid(),
+                    }
+                }
+                ClientOpcodeMessage::CMSG_QUESTGIVER_HELLO(hello) => Self::QuestGiverHello {
+                    guid: hello.guid.guid(),
+                },
+                ClientOpcodeMessage::CMSG_QUESTGIVER_QUERY_QUEST(query) => Self::QuestGiverQuery {
+                    guid: query.guid.guid(),
+                    quest_id: query.quest_id,
+                },
+                ClientOpcodeMessage::CMSG_QUESTGIVER_ACCEPT_QUEST(accept) => {
+                    Self::QuestGiverAccept {
+                        guid: accept.guid.guid(),
+                        quest_id: accept.quest_id,
+                    }
+                }
+                ClientOpcodeMessage::CMSG_QUESTGIVER_COMPLETE_QUEST(complete) => {
+                    Self::QuestGiverComplete {
+                        guid: complete.guid.guid(),
+                        quest_id: complete.quest_id,
+                    }
+                }
+                ClientOpcodeMessage::CMSG_QUESTGIVER_CHOOSE_REWARD(choose) => {
+                    Self::QuestGiverChooseReward {
+                        guid: choose.guid.guid(),
+                        quest_id: choose.quest_id,
+                        reward: choose.reward,
+                    }
+                }
+                ClientOpcodeMessage::CMSG_QUESTLOG_REMOVE_QUEST(remove) => {
+                    Self::QuestLogRemove { slot: remove.slot }
+                }
                 ClientOpcodeMessage::CMSG_LIST_INVENTORY(list) => Self::ListVendor {
                     guid: list.guid.guid(),
                 },
@@ -179,9 +266,9 @@ impl From<Incoming> for ClientAction {
                     item: buy.item,
                     amount: u32::from(buy.amount.max(1)),
                 },
-                ClientOpcodeMessage::CMSG_ITEM_QUERY_SINGLE(query) => Self::QueryItem {
-                    entry: query.item,
-                },
+                ClientOpcodeMessage::CMSG_ITEM_QUERY_SINGLE(query) => {
+                    Self::QueryItem { entry: query.item }
+                }
                 ClientOpcodeMessage::CMSG_LOOT(loot) => Self::Loot {
                     guid: loot.guid.guid(),
                 },
@@ -198,6 +285,7 @@ impl From<Incoming> for ClientAction {
                         None => Self::Ignored(IgnoredAction {
                             opcode: None,
                             name: Some("CMSG_MESSAGECHAT".to_string()),
+                            body_len: None,
                         }),
                     }
                 }
@@ -208,6 +296,7 @@ impl From<Incoming> for ClientAction {
                         Self::Ignored(IgnoredAction {
                             opcode: None,
                             name: Some(other.to_string()),
+                            body_len: None,
                         })
                     }
                 }

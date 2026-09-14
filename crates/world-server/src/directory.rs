@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::world::{ChatDelivery, PlayerMailbox, SpokenChat, WorldEvent};
 
+#[derive(Clone, Debug)]
+pub struct OnlinePlayer {
+    pub guid: u64,
+    pub name: String,
+    pub map_id: u32,
+    pub gmlevel: u8,
+}
+
 #[derive(Clone)]
 pub struct Directory {
     inner: Arc<Mutex<Inner>>,
@@ -20,6 +28,7 @@ struct Entry {
     guid: u64,
     name: String,
     map_id: u32,
+    gmlevel: u8,
     mailbox: PlayerMailbox,
 }
 
@@ -69,6 +78,7 @@ impl Directory {
                     guid,
                     name: name.clone(),
                     map_id,
+                    gmlevel: 0,
                     mailbox,
                 },
             );
@@ -137,18 +147,69 @@ impl Directory {
     }
 
     pub fn who(&self) -> Vec<(String, u32)> {
+        self.online()
+            .into_iter()
+            .map(|player| (player.name, player.map_id))
+            .collect()
+    }
+
+    pub fn online(&self) -> Vec<OnlinePlayer> {
         let local: Vec<_> = self
             .inner
             .lock()
             .expect("directory mutex")
             .by_guid
             .values()
-            .map(|entry| (entry.name.clone(), entry.map_id))
+            .map(|entry| OnlinePlayer {
+                guid: entry.guid,
+                name: entry.name.clone(),
+                map_id: entry.map_id,
+                gmlevel: entry.gmlevel,
+            })
             .collect();
         if !local.is_empty() || self.redis.is_none() {
             return local;
         }
-        self.redis_who().unwrap_or(local)
+        self.redis_who()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, map_id)| OnlinePlayer {
+                guid: 0,
+                name,
+                map_id,
+                gmlevel: 0,
+            })
+            .collect()
+    }
+
+    pub fn set_gmlevel(&self, guid: u64, gmlevel: u8) {
+        if let Some(entry) = self
+            .inner
+            .lock()
+            .expect("directory mutex")
+            .by_guid
+            .get_mut(&guid)
+        {
+            entry.gmlevel = gmlevel;
+        }
+    }
+
+    pub fn mailbox(&self, guid: u64) -> Option<PlayerMailbox> {
+        self.inner
+            .lock()
+            .expect("directory mutex")
+            .by_guid
+            .get(&guid)
+            .map(|entry| entry.mailbox.clone())
+    }
+
+    pub fn player_at(&self, guid: u64) -> Option<(String, u32)> {
+        self.inner
+            .lock()
+            .expect("directory mutex")
+            .by_guid
+            .get(&guid)
+            .map(|entry| (entry.name.clone(), entry.map_id))
     }
 
     pub fn whisper(&self, from: &PlayerMailbox, speaker: u64, to: String, text: String) {
@@ -175,11 +236,13 @@ impl Directory {
                     from_guid: speaker,
                     text: text.clone(),
                     delivery: ChatDelivery::Whisper,
+                    gm_tag: false,
                 }));
                 from.send(WorldEvent::Chat(SpokenChat {
                     from_guid: target.guid,
                     text: text.clone(),
                     delivery: ChatDelivery::WhisperInform,
+                    gm_tag: false,
                 }));
                 true
             } else {
@@ -193,6 +256,7 @@ impl Directory {
             from_guid: target_guid,
             text: text.clone(),
             delivery: ChatDelivery::WhisperInform,
+            gm_tag: false,
         }));
         self.redis_publish_whisper(target_guid, speaker, text);
     }
@@ -345,6 +409,7 @@ impl Directory {
                             from_guid: wire.from_guid,
                             text: wire.text,
                             delivery: ChatDelivery::Whisper,
+                            gm_tag: false,
                         }));
                     }
                 }

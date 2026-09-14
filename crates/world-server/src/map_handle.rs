@@ -3,6 +3,7 @@ use std::time::Instant;
 use wow_shared::Position;
 
 use crate::creature::Creature;
+use crate::gameobject::GameObject;
 use crate::player::Player;
 use crate::world::{Chat, Movement, PlayerMailbox, World};
 
@@ -17,6 +18,9 @@ pub trait MapHandle {
     fn creatures_near(&self, position: Position) -> Vec<Creature>;
     fn creature(&self, guid: u64) -> Option<Creature>;
     fn creature_by_entry(&self, entry: u32) -> Option<Creature>;
+    fn gameobjects_near(&self, position: Position) -> Vec<GameObject>;
+    fn gameobject(&self, guid: u64) -> Option<GameObject>;
+    fn gameobject_by_entry(&self, entry: u32) -> Option<GameObject>;
     fn broadcast_move(&self, from: &PlayerMailbox, movement: Movement);
     fn change_stand_state(&self, from: &PlayerMailbox, guid: u64, state: u8);
     fn open_gossip(&self, from: &PlayerMailbox, player: u64, npc: u64);
@@ -27,7 +31,23 @@ pub trait MapHandle {
     fn take_loot(&self, from: &PlayerMailbox, player: u64, npc: u64, index: u8);
     fn close_loot(&self, from: &PlayerMailbox, player: u64);
     fn npc_text(&self, text_id: u32) -> Option<String>;
+    fn npc_text_pages(&self, text_id: u32) -> [crate::catalog::NpcTextPage; 8];
     fn item(&self, entry: u32) -> Option<crate::catalog::ItemRow>;
+    fn quest(&self, entry: u32) -> Option<crate::catalog::QuestRow>;
+    fn questgiver_status(&self, from: &PlayerMailbox, player: u64, npc: u64);
+    fn open_questgiver(&self, from: &PlayerMailbox, player: u64, npc: u64);
+    fn query_quest_details(&self, from: &PlayerMailbox, player: u64, npc: u64, quest_id: u32);
+    fn accept_quest(&self, from: &PlayerMailbox, player: u64, npc: u64, quest_id: u32);
+    fn complete_quest(&self, from: &PlayerMailbox, player: u64, npc: u64, quest_id: u32);
+    fn choose_quest_reward(
+        &self,
+        from: &PlayerMailbox,
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+        reward: u32,
+    );
+    fn abandon_quest(&self, from: &PlayerMailbox, player: u64, slot: u8);
     fn speak(&self, from: &PlayerMailbox, chat: Chat);
     fn start_attack(&self, from: &PlayerMailbox, attacker: u64, target: u64);
     fn stop_attack(&self, from: &PlayerMailbox, attacker: u64);
@@ -65,6 +85,18 @@ impl MapHandle for World {
 
     fn creature_by_entry(&self, entry: u32) -> Option<Creature> {
         World::creature_by_entry(self, entry)
+    }
+
+    fn gameobjects_near(&self, position: Position) -> Vec<GameObject> {
+        World::gameobjects_near(self, position)
+    }
+
+    fn gameobject(&self, guid: u64) -> Option<GameObject> {
+        World::gameobject(self, guid)
+    }
+
+    fn gameobject_by_entry(&self, entry: u32) -> Option<GameObject> {
+        World::gameobject_by_entry(self, entry)
     }
 
     fn broadcast_move(&self, from: &PlayerMailbox, movement: Movement) {
@@ -108,8 +140,51 @@ impl MapHandle for World {
         World::npc_text(self, text_id)
     }
 
+    fn npc_text_pages(&self, text_id: u32) -> [crate::catalog::NpcTextPage; 8] {
+        World::npc_text_pages(self, text_id)
+    }
+
     fn item(&self, entry: u32) -> Option<crate::catalog::ItemRow> {
         World::item(self, entry)
+    }
+
+    fn quest(&self, entry: u32) -> Option<crate::catalog::QuestRow> {
+        World::quest(self, entry)
+    }
+
+    fn questgiver_status(&self, from: &PlayerMailbox, player: u64, npc: u64) {
+        World::questgiver_status(self, from, player, npc)
+    }
+
+    fn open_questgiver(&self, from: &PlayerMailbox, player: u64, npc: u64) {
+        World::open_questgiver(self, from, player, npc)
+    }
+
+    fn query_quest_details(&self, from: &PlayerMailbox, player: u64, npc: u64, quest_id: u32) {
+        World::query_quest_details(self, from, player, npc, quest_id)
+    }
+
+    fn accept_quest(&self, from: &PlayerMailbox, player: u64, npc: u64, quest_id: u32) {
+        World::accept_quest(self, from, player, npc, quest_id)
+    }
+
+    fn complete_quest(&self, from: &PlayerMailbox, player: u64, npc: u64, quest_id: u32) {
+        World::complete_quest(self, from, player, npc, quest_id)
+    }
+
+    fn choose_quest_reward(
+        &self,
+        from: &PlayerMailbox,
+        player: u64,
+        npc: u64,
+        quest_id: u32,
+        reward: u32,
+    ) {
+        World::choose_quest_reward(self, from, player, npc, quest_id, reward)
+    }
+
+    fn abandon_quest(&self, from: &PlayerMailbox, player: u64, slot: u8) {
+        World::abandon_quest(self, from, player, slot)
     }
 
     fn speak(&self, from: &PlayerMailbox, chat: Chat) {

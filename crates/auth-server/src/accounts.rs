@@ -23,6 +23,7 @@ pub struct AccountRecord {
     pub salt: [u8; SALT_LEN],
     pub verifier: [u8; VERIFIER_LEN],
     pub locked: bool,
+    pub gmlevel: u8,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -94,6 +95,7 @@ struct StoredAccount {
     salt: [u8; SALT_LEN],
     verifier: [u8; VERIFIER_LEN],
     locked: bool,
+    gmlevel: u8,
 }
 
 impl StoredAccount {
@@ -104,6 +106,7 @@ impl StoredAccount {
             salt: self.salt,
             verifier: self.verifier,
             locked: self.locked,
+            gmlevel: self.gmlevel,
         }
     }
 
@@ -169,7 +172,7 @@ impl AccountStore {
             }
             AccountStoreInner::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, username, srp_salt, srp_verifier, locked
+                    "SELECT id, username, srp_salt, srp_verifier, locked, gmlevel
                      FROM accounts
                      WHERE username = $1",
                 )
@@ -185,6 +188,7 @@ impl AccountStore {
                     salt: bytes_array(row.try_get::<Vec<u8>, _>("srp_salt")?)?,
                     verifier: bytes_array(row.try_get::<Vec<u8>, _>("srp_verifier")?)?,
                     locked: row.try_get("locked")?,
+                    gmlevel: gmlevel_from_db(row.try_get("gmlevel")?),
                 }))
             }
         }
@@ -304,6 +308,7 @@ impl AccountStore {
                     salt: [0; SALT_LEN],
                     verifier: [0; VERIFIER_LEN],
                     locked: row.try_get("locked").map_err(VerifyAccountError::store)?,
+                    gmlevel: 0,
                 };
                 finish_verify(&account, password)
             }
@@ -316,6 +321,63 @@ impl AccountStore {
         let memory = self.memory_inner().expect("memory store");
         if let Some(mut account) = memory.by_name.get_mut(&username) {
             account.locked = true;
+        }
+    }
+
+    pub async fn set_gmlevel(&self, username: &str, gmlevel: u8) -> anyhow::Result<bool> {
+        if gmlevel > 3 {
+            anyhow::bail!("gmlevel must be 0–3");
+        }
+        let Ok(username) = normalize_username(username) else {
+            return Ok(false);
+        };
+        match &self.inner {
+            AccountStoreInner::Memory(memory) => {
+                let Some(mut account) = memory.by_name.get_mut(&username) else {
+                    return Ok(false);
+                };
+                account.gmlevel = gmlevel;
+                Ok(true)
+            }
+            AccountStoreInner::Postgres(pool) => {
+                let result = sqlx::query("UPDATE accounts SET gmlevel = $2 WHERE username = $1")
+                    .bind(&username)
+                    .bind(gmlevel as i16)
+                    .execute(pool)
+                    .await?;
+                Ok(result.rows_affected() > 0)
+            }
+        }
+    }
+
+    pub async fn list_gms(&self) -> anyhow::Result<Vec<(String, u8)>> {
+        match &self.inner {
+            AccountStoreInner::Memory(memory) => {
+                let mut gms: Vec<_> = memory
+                    .by_name
+                    .iter()
+                    .filter(|entry| entry.gmlevel > 0)
+                    .map(|entry| (entry.username.clone(), entry.gmlevel))
+                    .collect();
+                gms.sort_by(|a, b| a.0.cmp(&b.0));
+                Ok(gms)
+            }
+            AccountStoreInner::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT username, gmlevel FROM accounts WHERE gmlevel > 0 ORDER BY username",
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            row.get::<String, _>("username"),
+                            gmlevel_from_db(row.get("gmlevel")),
+                        )
+                    })
+                    .collect())
+            }
         }
     }
 }
@@ -345,6 +407,7 @@ impl MemoryAccounts {
             salt,
             verifier,
             locked: false,
+            gmlevel: 0,
         };
         let profile = stored.profile();
         self.by_name.insert(username.clone(), stored);
@@ -446,6 +509,10 @@ fn bytes_array<const N: usize>(bytes: Vec<u8>) -> anyhow::Result<[u8; N]> {
         .map_err(|bytes: Vec<u8>| anyhow::anyhow!("expected {N} bytes, got {}", bytes.len()))
 }
 
+fn gmlevel_from_db(value: i16) -> u8 {
+    u8::try_from(value).unwrap_or(0).min(3)
+}
+
 pub async fn connect_auth(database_url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .after_connect(|conn, _meta| {
@@ -471,12 +538,24 @@ mod tests {
     use wow_srp::{GENERATOR, LARGE_SAFE_PRIME_LITTLE_ENDIAN};
 
     #[tokio::test]
+    async fn set_gmlevel_updates_memory_account() {
+        let store = AccountStore::memory();
+        store.create("alice", "secret123", None).await.unwrap();
+        assert!(store.set_gmlevel("alice", 3).await.unwrap());
+        let account = store.get_by_username("alice").await.unwrap().unwrap();
+        assert_eq!(account.gmlevel, 3);
+        let gms = store.list_gms().await.unwrap();
+        assert_eq!(gms, vec![("ALICE".into(), 3)]);
+    }
+
+    #[tokio::test]
     async fn memory_store_seeds_user1() {
         let store = AccountStore::memory_with_user1().unwrap();
         let account = store.get_by_username("user1").await.unwrap().unwrap();
         assert_eq!(account.id, 1);
         assert_eq!(account.username, "USER1");
         assert!(!account.locked);
+        assert_eq!(account.gmlevel, 0);
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ Il portale e l’auth-server condividono Postgres: registrazione e login web fun
 
 Le tabelle si creano da sole al primo avvio (sqlx, equivalente Flyway). Redis resta opzionale per le sessioni live, non per gli account.
 
-Il world-server crea lo schema `world` vuoto (creature, item, vendor, loot, gossip). I dati CMaNGOS classic-db stanno in `db/*.sql.gz` e **non** partono con `migrate!`: dopo il primo avvio del world-server, carica il catalogo a mano:
+Il world-server crea lo schema `world` vuoto (creature, item, vendor, loot, gossip, quest). I dati CMaNGOS classic-db stanno in `db/*.sql.gz` e **non** partono con `migrate!`: dopo il primo avvio del world-server, carica il catalogo a mano:
 
 ```bash
 export DATABASE_URL=postgres://wow:wow@127.0.0.1:5432/wow
@@ -75,6 +75,28 @@ set realmlist 127.0.0.1
 
 Il realm si chiama **WoWServer**. Username: 2–16 caratteri alfanumerici (il gioco li tratta in maiuscolo).
 
+## DBC del client
+
+I `.dbc` stanno negli MPQ del client (`Data/*.MPQ`). Sono materiale Blizzard: **non** vanno in git. Estraili una volta dalla tua installazione 1.12.1:
+
+```bash
+cargo run -p extract-dbc -- --client /path/to/WoW --out data/dbc
+```
+
+Oppure `WOW_CLIENT_PATH` e `DBC_DIR`. Funziona sia col client retail (`Data/enUS/locale-enUS.MPQ`) sia con pack tipo RetroWoW (`Data/dbc.MPQ`, senza cartella locale). Il world-server legge `data/dbc/FactionTemplate.dbc` all’avvio (ostilità / cursore spada). Se il file manca, usa le maschere builtin. Altri DBC restano su disco per usi successivi.
+
+Vedi [`db/COPYRIGHT.md`](db/COPYRIGHT.md).
+
+## Comandi GM
+
+Il world-server intercetta i messaggi che iniziano con `.` o `!` (CMaNGOS Classic). Livelli: `0` player, `1` moderator, `2` GM, `3` admin. Dopo la migrazione auth, promuovi un account e **ri-loggati**:
+
+```sql
+UPDATE accounts SET gmlevel = 3 WHERE username = 'TUONOME';
+```
+
+`.help` elenca i comandi del tuo livello. Quelli non ancora supportati dal mondo rispondono `Command not implemented yet.`
+
 ## Variabili d'ambiente
 
 | Variabile | Default | Servizio |
@@ -82,12 +104,14 @@ Il realm si chiama **WoWServer**. Username: 2–16 caratteri alfanumerici (il gi
 | `DATABASE_URL` | *(obbligatoria)* | auth-server, world-server, portale |
 | `AUTH_BIND` | `0.0.0.0:3724` | auth-server |
 | `AUTH_INTERNAL_BIND` | `127.0.0.1:9090` | auth-server |
-| `AUTH_INTERNAL_TOKEN` | *(opzionale)* | auth-server (header `X-Auth-Internal-Token` su create/verify/get account) |
+| `AUTH_INTERNAL_TOKEN` | *(opzionale)* | auth-server e world-server (header `X-Auth-Internal-Token`; il world lo usa per `.account set gmlevel`) |
 | `WORLD_PUBLIC_ADDR` | `127.0.0.1:8085` | auth-server (indirizzo nel realm list) |
 | `WORLD_BIND` | `0.0.0.0:8085` | world-server |
 | `AUTH_INTERNAL_URL` | `http://127.0.0.1:9090` | world-server |
 | `REDIS_URL` | *(opzionale)* | auth-server, world-server |
 | `LOG_UNHANDLED_PACKETS` | `false` | world-server |
+| `DBC_DIR` | `data/dbc` | world-server (cartella dei `.dbc` estratti) |
+| `WOW_CLIENT_PATH` | *(obbligatoria per extract-dbc)* | `extract-dbc` (installazione 1.12.1) |
 | `JWT_SECRET` | `dev-wowserver-jwt-secret` | portale web |
 | `PORT` | `3000` | portale web |
 | `DISCORD_INVITE_URL` | `https://discord.gg/your-invite` | portale web |

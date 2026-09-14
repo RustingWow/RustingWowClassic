@@ -7,6 +7,7 @@ use wow_shared::{ShardFile, WorldConfig};
 use crate::catalog::Catalog;
 use crate::creature::Creature;
 use crate::directory::Directory;
+use crate::gameobject::GameObject;
 use crate::map_handle::MapHandle;
 use crate::player::Player;
 use crate::rpc::MapSession;
@@ -16,6 +17,7 @@ use crate::world::{Chat, ChatChannel, PlayerMailbox, World};
 pub struct JoinResult {
     pub others: Vec<Player>,
     pub creatures: Vec<Creature>,
+    pub gameobjects: Vec<GameObject>,
 }
 
 #[derive(Clone)]
@@ -97,6 +99,7 @@ impl MapRouter {
         Some(JoinResult {
             others,
             creatures: world.creatures_near(position),
+            gameobjects: world.gameobjects_near(position),
         })
     }
 

@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
 use super::*;
-use crate::creature::{northshire_guard_guid, northshire_wolf, northshire_wolf_guid};
-use crate::player::PLAYER_DAMAGE;
+use crate::creature::{
+    FACTION_MONSTER, FACTION_STORMWIND, northshire_guard, northshire_guard_guid, northshire_wolf,
+    northshire_wolf_guid,
+};
+use crate::player::{PLAYER_DAMAGE, PLAYER_MAX_HEALTH, STAND_STATE_DEAD, STAND_STATE_SIT};
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage;
 
 fn player(guid: u64) -> Player {
@@ -30,5 +33,6 @@ mod chat;
 mod combat;
 mod gossip;
 mod players;
+mod quests;
 mod stand_state;
 mod visibility;

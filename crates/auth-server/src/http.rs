@@ -5,7 +5,7 @@ use crate::store::SessionStore;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -30,6 +30,12 @@ struct CreateAccountBody {
 struct VerifyAccountBody {
     username: String,
     password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetGmLevelBody {
+    username: String,
+    gmlevel: u8,
 }
 
 #[derive(serde::Serialize)]
@@ -59,6 +65,8 @@ fn router(state: HttpState) -> Router {
         .route("/internal/sessions/{account}", get(get_session))
         .route("/internal/accounts", post(create_account))
         .route("/internal/accounts/verify", post(verify_account))
+        .route("/internal/accounts/gm", get(list_gms))
+        .route("/internal/accounts/gmlevel", put(set_gmlevel))
         .route("/internal/accounts/{id}", get(get_account))
         .with_state(Arc::new(state))
 }
@@ -157,6 +165,57 @@ async fn get_account(
         Err(error) => {
             tracing::error!(?error, "failed to load account");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load account.")
+        }
+    }
+}
+
+async fn set_gmlevel(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Json(body): Json<SetGmLevelBody>,
+) -> impl IntoResponse {
+    if let Err(response) = require_internal_token(&headers, &state.internal_token) {
+        return response;
+    }
+    if body.gmlevel > 3 {
+        return error_response(StatusCode::BAD_REQUEST, "gmlevel must be 0–3.");
+    }
+    match state
+        .accounts
+        .set_gmlevel(&body.username, body.gmlevel)
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            tracing::error!(?error, "failed to set gmlevel");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to set gmlevel.",
+            )
+        }
+    }
+}
+
+async fn list_gms(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_internal_token(&headers, &state.internal_token) {
+        return response;
+    }
+    match state.accounts.list_gms().await {
+        Ok(gms) => Json(
+            gms.into_iter()
+                .map(|(username, gmlevel)| {
+                    serde_json::json!({ "username": username, "gmlevel": gmlevel })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => {
+            tracing::error!(?error, "failed to list gms");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to list GM accounts.",
+            )
         }
     }
 }

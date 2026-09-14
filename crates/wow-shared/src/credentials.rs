@@ -5,6 +5,8 @@ use thiserror::Error;
 pub struct Account {
     pub id: i64,
     pub username: String,
+    /// CMaNGOS security: 0 player, 1 moderator, 2 GM, 3 admin.
+    pub gmlevel: u8,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

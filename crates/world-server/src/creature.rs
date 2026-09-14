@@ -1,4 +1,4 @@
-use wow_shared::{CreatureFaction, Position};
+use wow_shared::{CreatureFaction, GossipOptionIcon, GossipOptionKind, Position};
 use wow_world_messages::vanilla::CreatureFamily;
 
 const UNIT_HIGH: u64 = 0xF130;
@@ -10,7 +10,9 @@ pub const DISPLAY_YOUNG_WOLF: i32 = 447;
 pub const FACTION_STORMWIND: i32 = CreatureFaction::Stormwind.as_protocol() as i32;
 pub const FACTION_MONSTER: i32 = CreatureFaction::Monster.as_protocol() as i32;
 pub const NPC_FLAG_GOSSIP: i32 = 1;
+pub const NPC_FLAG_QUESTGIVER: i32 = 2;
 pub const NPC_FLAG_VENDOR: i32 = 4;
+pub const NPC_FLAGS_HANDLED: i32 = NPC_FLAG_GOSSIP | NPC_FLAG_QUESTGIVER | NPC_FLAG_VENDOR;
 pub const GUARD_GOSSIP_TEXT_ID: u32 = 900_001;
 pub const GUARD_GOSSIP_TEXT: &str =
     "Welcome to Northshire, recruit. Keep your weapon close—wolves still hunt these woods.";
@@ -21,6 +23,7 @@ pub const GUARD_GOSSIP_ASK_ID: u32 = 0;
 pub const GUARD_GOSSIP_ACCEPT_ID: u32 = 1;
 pub const CREATURE_TYPE_BEAST: u32 = 1;
 pub const CREATURE_TYPE_HUMANOID: u32 = 7;
+pub const CREATURE_TYPE_CRITTER: u32 = 8;
 pub const WOLF_HEALTH: i32 = 45;
 pub const WOLF_DAMAGE: i32 = 4;
 pub const GUARD_HEALTH: i32 = 100;
@@ -43,6 +46,7 @@ pub struct Creature {
     pub civilian: bool,
     pub hostile: bool,
     pub dead: bool,
+    pub lootable: bool,
     pub gossip: Option<Gossip>,
     pub loot_id: i32,
     pub respawn_secs: u32,
@@ -65,6 +69,10 @@ pub struct GossipMenu {
 pub struct GossipOption {
     pub id: u32,
     pub text: String,
+    #[serde(default)]
+    pub icon: GossipOptionIcon,
+    #[serde(default)]
+    pub kind: GossipOptionKind,
     pub action: GossipAction,
 }
 
@@ -73,6 +81,11 @@ pub enum GossipAction {
     Close,
     ShowMenu { text_id: u32 },
     OpenVendor,
+    OpenQuestGiver,
+}
+
+pub fn unhandled_npc_flags(npc_flags: i32) -> i32 {
+    npc_flags & !NPC_FLAGS_HANDLED
 }
 
 impl Gossip {
@@ -98,6 +111,12 @@ impl Creature {
             && !self.dead
             && !self.hostile
             && self.gossip.is_some()
+    }
+
+    pub fn can_questgiver(&self) -> bool {
+        (self.npc_flags & NPC_FLAG_QUESTGIVER != 0 || self.can_gossip())
+            && !self.dead
+            && !self.hostile
     }
 }
 
@@ -140,6 +159,7 @@ pub fn northshire_guard() -> Creature {
         civilian: false,
         hostile: false,
         dead: false,
+        lootable: false,
         gossip: Some(northshire_guard_gossip()),
         loot_id: 0,
         respawn_secs: 20,
@@ -156,6 +176,8 @@ fn northshire_guard_gossip() -> Gossip {
                 options: vec![GossipOption {
                     id: GUARD_GOSSIP_ASK_ID,
                     text: "What's nearby?".to_string(),
+                    icon: GossipOptionIcon::Chat,
+                    kind: GossipOptionKind::Gossip,
                     action: GossipAction::ShowMenu {
                         text_id: GUARD_GOSSIP_WOLF_TEXT_ID,
                     },
@@ -167,6 +189,8 @@ fn northshire_guard_gossip() -> Gossip {
                 options: vec![GossipOption {
                     id: GUARD_GOSSIP_ACCEPT_ID,
                     text: "I'll take care of it.".to_string(),
+                    icon: GossipOptionIcon::Chat,
+                    kind: GossipOptionKind::Gossip,
                     action: GossipAction::Close,
                 }],
             },
@@ -197,6 +221,7 @@ pub fn northshire_wolf() -> Creature {
         civilian: false,
         hostile: true,
         dead: false,
+        lootable: false,
         gossip: None,
         loot_id: 0,
         respawn_secs: 20,

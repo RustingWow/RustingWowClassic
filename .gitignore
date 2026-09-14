@@ -5,3 +5,4 @@ dist
 .env
 web/dist
 db/.classicdb-cache.sql.gz
+data/dbc/

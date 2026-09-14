@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 use super::db_enum;
 
 /// CMaNGOS `gossip_menu_option.option_id` — what the gossip row does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum GossipOptionKind {
+    #[default]
     #[serde(rename = "NONE")]
     None,
     #[serde(rename = "GOSSIP")]
@@ -68,4 +69,64 @@ db_enum!(
     UnlearnTalents => 16, "UNLEARN_TALENTS",
     UnlearnPetSkills => 17, "UNLEARN_PET_SKILLS",
     Bot => 99, "BOT",
+);
+
+impl GossipOptionKind {
+    /// Kinds the world server actually maps to a gossip action.
+    pub fn is_handled(self) -> bool {
+        matches!(
+            self,
+            Self::None | Self::Gossip | Self::Vendor | Self::QuestGiver
+        )
+    }
+}
+
+/// CMaNGOS / Trinity `GossipOptionIcon` — bubble shown next to the gossip row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum GossipOptionIcon {
+    #[default]
+    #[serde(rename = "CHAT")]
+    Chat,
+    #[serde(rename = "VENDOR")]
+    Vendor,
+    #[serde(rename = "TAXI")]
+    Taxi,
+    #[serde(rename = "TRAINER")]
+    Trainer,
+    #[serde(rename = "INTERACT_1")]
+    Interact1,
+    #[serde(rename = "INTERACT_2")]
+    Interact2,
+    #[serde(rename = "MONEY_BAG")]
+    MoneyBag,
+    #[serde(rename = "TALK")]
+    Talk,
+    #[serde(rename = "TABARD")]
+    Tabard,
+    #[serde(rename = "BATTLE")]
+    Battle,
+    #[serde(rename = "DOT")]
+    Dot,
+    #[serde(rename = "CHAT_11")]
+    Chat11,
+    #[serde(rename = "CHAT_12")]
+    Chat12,
+}
+
+db_enum!(
+    GossipOptionIcon,
+    u8,
+    Chat => 0, "CHAT",
+    Vendor => 1, "VENDOR",
+    Taxi => 2, "TAXI",
+    Trainer => 3, "TRAINER",
+    Interact1 => 4, "INTERACT_1",
+    Interact2 => 5, "INTERACT_2",
+    MoneyBag => 6, "MONEY_BAG",
+    Talk => 7, "TALK",
+    Tabard => 8, "TABARD",
+    Battle => 9, "BATTLE",
+    Dot => 10, "DOT",
+    Chat11 => 11, "CHAT_11",
+    Chat12 => 12, "CHAT_12",
 );

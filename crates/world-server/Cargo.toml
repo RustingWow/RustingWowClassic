@@ -8,6 +8,7 @@ default-run = "world-server"
 
 [dependencies]
 anyhow.workspace = true
+client-data.workspace = true
 redis.workspace = true
 reqwest.workspace = true
 serde.workspace = true

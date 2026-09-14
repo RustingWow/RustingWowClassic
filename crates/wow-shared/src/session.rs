@@ -9,6 +9,9 @@ pub struct SessionInfo {
     pub account: String,
     #[serde(with = "session_key_serde")]
     pub session_key: [u8; SESSION_KEY_LEN],
+    /// CMaNGOS security: 0 player, 1 moderator, 2 GM, 3 admin.
+    #[serde(default)]
+    pub gmlevel: u8,
 }
 
 mod session_key_serde {

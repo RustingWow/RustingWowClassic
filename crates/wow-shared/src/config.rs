@@ -34,6 +34,8 @@ pub struct WorldConfig {
     pub map_endpoints: HashMap<u32, SocketAddr>,
     pub redis_url: Option<String>,
     pub database_url: String,
+    pub auth_internal_token: Option<String>,
+    pub dbc_dir: PathBuf,
 }
 
 impl AuthConfig {
@@ -65,6 +67,12 @@ impl WorldConfig {
             map_endpoints: parse_map_endpoints("MAP_ENDPOINTS")?,
             redis_url: optional_env("REDIS_URL"),
             database_url: required_env("DATABASE_URL")?,
+            auth_internal_token: optional_env("AUTH_INTERNAL_TOKEN"),
+            dbc_dir: env::var("DBC_DIR")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("data/dbc")),
             shards,
             role,
             map_ids,

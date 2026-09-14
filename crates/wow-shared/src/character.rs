@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{
-    CharacterArea, CharacterClass, CharacterGender, CharacterMap, CharacterRace,
-};
+use crate::enums::{CharacterArea, CharacterClass, CharacterGender, CharacterMap, CharacterRace};
 
 pub const NORTHSHIRE_X: f32 = -8949.95;
 pub const NORTHSHIRE_Y: f32 = -132.493;
@@ -33,7 +31,10 @@ impl Position {
     }
 
     pub fn cell(self, size: f32) -> (i32, i32) {
-        ((self.x / size).floor() as i32, (self.y / size).floor() as i32)
+        (
+            (self.x / size).floor() as i32,
+            (self.y / size).floor() as i32,
+        )
     }
 }
 

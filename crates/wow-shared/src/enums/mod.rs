@@ -3,17 +3,21 @@
 mod area;
 mod class;
 mod faction;
+mod faction_reaction;
 mod gender;
 mod gossip;
 mod map;
+mod quest;
 mod race;
 
 pub use area::CharacterArea;
 pub use class::CharacterClass;
 pub use faction::CreatureFaction;
+pub use faction_reaction::{ensure_hostile_to_players, hostile_to_players};
 pub use gender::CharacterGender;
-pub use gossip::GossipOptionKind;
+pub use gossip::{GossipOptionIcon, GossipOptionKind};
 pub use map::CharacterMap;
+pub use quest::QuestType;
 pub use race::CharacterRace;
 
 macro_rules! db_enum {
@@ -129,5 +133,19 @@ mod tests {
             Some(GossipOptionKind::Bot)
         );
         assert_eq!(GossipOptionKind::Bot.as_protocol(), 99);
+        assert!(GossipOptionKind::Vendor.is_handled());
+        assert!(!GossipOptionKind::Trainer.is_handled());
+        assert_eq!(
+            GossipOptionIcon::from_protocol(3),
+            Some(GossipOptionIcon::Trainer)
+        );
+        assert_eq!(GossipOptionIcon::Chat.as_str(), "CHAT");
+        assert_eq!(QuestType::from_protocol(81), Some(QuestType::Dungeon));
+        assert_eq!(QuestType::Elite.as_str(), "ELITE");
+        assert_eq!(
+            CreatureFaction::from_protocol(0),
+            Some(CreatureFaction::None)
+        );
+        assert_eq!(CreatureFaction::None.as_str(), "NONE");
     }
 }

@@ -1,6 +1,7 @@
 """Vanilla 1.12 FactionTemplate.dbc labels for creature_types.faction."""
 
 FACTION_LABELS = {
+    0: "NONE",
     1: "PLAYER_HUMAN",
     2: "PLAYER_ORC",
     3: "PLAYER_DWARF",

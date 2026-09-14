@@ -1,9 +1,10 @@
 use super::*;
 use crate::creature::{
     GUARD_GOSSIP_ACCEPT_ID, GUARD_GOSSIP_ASK_ID, GUARD_GOSSIP_TEXT, GUARD_GOSSIP_TEXT_ID,
-    GUARD_GOSSIP_WOLF_TEXT, GUARD_GOSSIP_WOLF_TEXT_ID, northshire_guard, northshire_guard_guid,
-    northshire_wolf_guid,
+    GUARD_GOSSIP_WOLF_TEXT, GUARD_GOSSIP_WOLF_TEXT_ID, GossipAction, GossipOption,
+    northshire_guard, northshire_guard_guid, northshire_wolf_guid,
 };
+use wow_shared::{GossipOptionIcon, GossipOptionKind};
 
 fn talking_to_guard() -> (World, PlayerMailbox, mpsc::UnboundedReceiver<WorldEvent>) {
     let world = World::new();
@@ -21,7 +22,7 @@ fn talking_to_the_guard_opens_gossip() {
     world.open_gossip(&mailbox, 1, northshire_guard_guid());
 
     match rx.try_recv().expect("gossip") {
-        WorldEvent::GossipOpened { npc, menu } => {
+        WorldEvent::GossipOpened { npc, menu, .. } => {
             assert_eq!(npc, northshire_guard_guid());
             assert_eq!(menu.text_id, GUARD_GOSSIP_TEXT_ID);
             assert_eq!(menu.text, GUARD_GOSSIP_TEXT);
@@ -40,7 +41,7 @@ fn asking_the_guard_opens_the_wolf_menu() {
     world.select_gossip_option(&mailbox, 1, northshire_guard_guid(), GUARD_GOSSIP_ASK_ID);
 
     match rx.try_recv().expect("gossip") {
-        WorldEvent::GossipOpened { npc, menu } => {
+        WorldEvent::GossipOpened { npc, menu, .. } => {
             assert_eq!(npc, northshire_guard_guid());
             assert_eq!(menu.text_id, GUARD_GOSSIP_WOLF_TEXT_ID);
             assert_eq!(menu.text, GUARD_GOSSIP_WOLF_TEXT);
@@ -109,4 +110,30 @@ fn npc_text_query_returns_guard_pages() {
         Some(GUARD_GOSSIP_WOLF_TEXT)
     );
     assert!(world.npc_text(1).is_none());
+}
+
+#[test]
+fn unhandled_gossip_kind_closes() {
+    let mut guard = northshire_guard();
+    guard.gossip.as_mut().unwrap().menus[0]
+        .options
+        .push(GossipOption {
+            id: 7,
+            text: "Train me.".into(),
+            icon: GossipOptionIcon::Trainer,
+            kind: GossipOptionKind::Trainer,
+            action: GossipAction::Close,
+        });
+    let world = World::with_creatures(vec![guard], None);
+    let (mailbox, mut rx) = PlayerMailbox::channel();
+    let mut visitor = player(1);
+    visitor.position = northshire_guard().position;
+    world.join(visitor, mailbox.clone());
+
+    world.select_gossip_option(&mailbox, 1, northshire_guard_guid(), 7);
+
+    match rx.try_recv().expect("close") {
+        WorldEvent::GossipClosed => {}
+        other => panic!("expected close, got {other:?}"),
+    }
 }

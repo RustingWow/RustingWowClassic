@@ -62,6 +62,7 @@ async fn serve_with_store(
         world_public_addr,
     ));
     let http = tokio::spawn(http::serve(http_listener, store, accounts, internal_token));
+    tracing::info!(%login_addr, %http_addr, "auth-server ready");
 
     tokio::select! {
         result = login => result??,

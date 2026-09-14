@@ -83,6 +83,7 @@ fn whisper_reaches_player_on_another_map() {
                 to: "user1".to_string(),
             },
             text: "across".to_string(),
+            gm_tag: false,
         },
     );
 

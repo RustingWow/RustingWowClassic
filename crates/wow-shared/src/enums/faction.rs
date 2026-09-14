@@ -7,6 +7,8 @@ use super::DbEnum;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CreatureFaction {
+    #[serde(rename = "NONE")]
+    None,
     #[serde(rename = "PLAYER_HUMAN")]
     PlayerHuman,
     #[serde(rename = "PLAYER_ORC")]
@@ -660,6 +662,7 @@ pub enum CreatureFaction {
 impl CreatureFaction {
     pub const fn as_protocol(self) -> u32 {
         match self {
+            Self::None => 0,
             Self::PlayerHuman => 1,
             Self::PlayerOrc => 2,
             Self::PlayerDwarf => 3,
@@ -989,6 +992,7 @@ impl CreatureFaction {
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::None => "NONE",
             Self::PlayerHuman => "PLAYER_HUMAN",
             Self::PlayerOrc => "PLAYER_ORC",
             Self::PlayerDwarf => "PLAYER_DWARF",
@@ -1318,6 +1322,7 @@ impl CreatureFaction {
 
     pub fn from_protocol(value: u32) -> Option<Self> {
         match value {
+            0 => Some(Self::None),
             1 => Some(Self::PlayerHuman),
             2 => Some(Self::PlayerOrc),
             3 => Some(Self::PlayerDwarf),
@@ -1648,6 +1653,7 @@ impl CreatureFaction {
 
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
+            "NONE" => Some(Self::None),
             "PLAYER_HUMAN" => Some(Self::PlayerHuman),
             "PLAYER_ORC" => Some(Self::PlayerOrc),
             "PLAYER_DWARF" => Some(Self::PlayerDwarf),
@@ -1976,8 +1982,9 @@ impl CreatureFaction {
         }
     }
 
-    pub const fn variants() -> [Self; 324] {
+    pub const fn variants() -> [Self; 325] {
         [
+            Self::None,
             Self::PlayerHuman,
             Self::PlayerOrc,
             Self::PlayerDwarf,

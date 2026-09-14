@@ -8,6 +8,7 @@ use crate::appearance::{HUMAN_MALE_DISPLAY_ID, display_id, faction};
 pub const PLAYER_MAX_HEALTH: i32 = 100;
 pub const PLAYER_DAMAGE: i32 = 12;
 pub const STAND_STATE_STAND: u8 = 0;
+pub const STAND_STATE_SIT: u8 = 1;
 pub const STAND_STATE_DEAD: u8 = 7;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -28,6 +29,31 @@ pub struct Player {
     pub copper: u32,
     #[serde(default)]
     pub bag: [Option<(u32, u32)>; 16],
+    #[serde(default)]
+    pub gm_on: bool,
+    #[serde(default = "default_true")]
+    pub gm_visible: bool,
+    #[serde(default)]
+    pub gm_chat: bool,
+    #[serde(default)]
+    pub gmlevel: u8,
+    #[serde(default)]
+    pub quest_log: Vec<QuestLogEntry>,
+    #[serde(default)]
+    pub rewarded_quests: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct QuestLogEntry {
+    pub quest_id: u32,
+    pub kills: [u32; 4],
+    pub complete: bool,
+}
+
+pub const QUEST_LOG_SLOTS: usize = 20;
+
+fn default_true() -> bool {
+    true
 }
 
 impl Player {
@@ -47,6 +73,12 @@ impl Player {
             faction: CreatureFaction::PlayerHuman.as_protocol() as i32,
             copper: 10_000,
             bag: [None; 16],
+            gm_on: false,
+            gm_visible: true,
+            gm_chat: false,
+            gmlevel: 0,
+            quest_log: Vec::new(),
+            rewarded_quests: Vec::new(),
         }
     }
 
